@@ -15,7 +15,7 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 
 from stocks_universe import ALL_STOCKS, NIFTY_50, NIFTY_NEXT_50, HIGH_MOMENTUM_MIDCAP, get_display_name
-from data_fetcher import fetch_ohlcv, get_52_week_stats, get_ticker_info
+from data_fetcher import fetch_ohlcv, get_52_week_stats, get_ticker_info, clear_cache
 from analyzer import analyze
 from screener import run_screener, filter_by_strategy, get_top_buys, get_sector_breakdown, get_summary_stats
 from risk_manager import calculate_trade_setup, quick_position_size, portfolio_health_check
@@ -180,7 +180,19 @@ with tab2:
     with col_c:
         min_score = st.number_input("Min Score", 0, 100, 50)
 
-    run_btn = st.button("🔍 Run Screener", type="primary")
+    btn_col, clear_col, info_col = st.columns([1, 1, 4])
+    with btn_col:
+        run_btn = st.button("🔍 Run Screener", type="primary", use_container_width=True)
+    with clear_col:
+        if st.button("🗑️ Clear Cache", use_container_width=True,
+                     help="If screener returns 0 stocks, click this then run again"):
+            clear_cache()
+            st.session_state.screener_df = pd.DataFrame()
+            st.session_state.screener_summary = {}
+            st.success("Cache cleared!")
+    with info_col:
+        st.info("If scan returns 0 stocks: Yahoo Finance may be rate-limiting. "
+                "Wait 5 minutes, click **Clear Cache**, then run again.")
 
     if "screener_df" not in st.session_state:
         st.session_state.screener_df = pd.DataFrame()
