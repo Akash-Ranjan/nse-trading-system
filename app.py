@@ -115,10 +115,11 @@ with tab1:
     with st.spinner("Fetching NIFTY data..."):
         nifty_df = fetch_ohlcv("^NSEI", period="6mo")
 
-    if nifty_df is not None:
-        nifty_ret_1m = round((nifty_df["Close"].iloc[-1] / nifty_df["Close"].iloc[-22] - 1) * 100, 2)
-        nifty_ret_3m = round((nifty_df["Close"].iloc[-1] / nifty_df["Close"].iloc[-63] - 1) * 100, 2)
+    if nifty_df is not None and len(nifty_df) > 0:
+        n = len(nifty_df)
         nifty_price = round(nifty_df["Close"].iloc[-1], 2)
+        nifty_ret_1m = round((nifty_df["Close"].iloc[-1] / nifty_df["Close"].iloc[max(-22, -n)] - 1) * 100, 2)
+        nifty_ret_3m = round((nifty_df["Close"].iloc[-1] / nifty_df["Close"].iloc[max(-63, -n)] - 1) * 100, 2)
         nb1, nb2, nb3 = st.columns(3)
         nb1.metric("NIFTY 50", f"{nifty_price:,.2f}")
         nb2.metric("1M Return", f"{nifty_ret_1m:+.1f}%")
@@ -361,12 +362,10 @@ with tab3:
 
         # Relative strength vs NIFTY
         nifty_df = fetch_ohlcv("^NSEI", period="3mo")
-        if nifty_df is not None and len(df_stock) >= 63:
+        if nifty_df is not None and len(nifty_df) >= 63 and len(df_stock) >= 63:
             nifty_ret = (nifty_df["Close"].iloc[-1] / nifty_df["Close"].iloc[-63] - 1) * 100
             rs = result["ret_3m"] - nifty_ret
-            rs_label = f"{rs:+.1f}% vs NIFTY"
-            rs_color = "normal" if rs > 0 else "inverse"
-            col4.metric("RS vs NIFTY (3M)", rs_label)
+            col4.metric("RS vs NIFTY (3M)", f"{rs:+.1f}% vs NIFTY")
 
         st.divider()
 
