@@ -1,6 +1,5 @@
 """
-NSE Trading Dashboard — main Streamlit application.
-
+NSE Trading Dashboard — Enhanced v2
 Run: streamlit run app.py
 """
 
@@ -10,15 +9,19 @@ warnings.filterwarnings("ignore")
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 
 from stocks_universe import ALL_STOCKS, NIFTY_50, NIFTY_NEXT_50, HIGH_MOMENTUM_MIDCAP, get_display_name
-from data_fetcher import fetch_ohlcv, get_52_week_stats
+from data_fetcher import fetch_ohlcv, get_52_week_stats, get_ticker_info
 from analyzer import analyze
 from screener import run_screener, filter_by_strategy, get_top_buys, get_sector_breakdown, get_summary_stats
 from risk_manager import calculate_trade_setup, quick_position_size, portfolio_health_check
+from backtest import backtest_all_strategies, compute_equity_curve, compute_max_drawdown
+from portfolio_store import load_portfolio, save_portfolio, add_position, remove_position
+from alerts import send_bulk_alerts, send_test_message
 
 # ── Page Config ───────────────────────────────────────────────────────────────
 
@@ -29,20 +32,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Custom CSS ────────────────────────────────────────────────────────────────
-
 st.markdown("""
 <style>
     .main-header { font-size: 2rem; font-weight: 700; margin-bottom: 0.2rem; }
     .sub-header  { color: #666; font-size: 0.95rem; margin-bottom: 1.5rem; }
-    .metric-card { background: #f8f9fa; border-radius: 8px; padding: 1rem;
-                   border-left: 4px solid #1f77b4; }
-    .signal-STRONG-BUY { color: #00a651; font-weight: 700; }
-    .signal-BUY        { color: #4caf50; font-weight: 600; }
-    .signal-WATCH      { color: #ff9800; font-weight: 600; }
-    .signal-NEUTRAL    { color: #9e9e9e; }
-    .signal-AVOID      { color: #f44336; font-weight: 600; }
-    .stDataFrame thead tr th { background-color: #1f2937; color: white; }
     div[data-testid="metric-container"] { background: #f8f9fa;
         border-radius: 8px; padding: 0.5rem 1rem; }
 </style>
@@ -55,32 +48,14 @@ with st.sidebar:
     st.markdown("## ⚙️ Settings")
     st.divider()
 
-    capital = st.number_input(
-        "Trading Capital (₹)",
-        min_value=10_000,
-        max_value=10_000_000,
-        value=100_000,
-        step=10_000,
-        help="Total capital you want to deploy for trading.",
-    )
-
-    risk_per_trade = st.slider(
-        "Risk per Trade (%)",
-        min_value=0.5,
-        max_value=3.0,
-        value=2.0,
-        step=0.25,
-        help="Maximum % of capital you're willing to lose on a single trade.",
-    )
+    capital = st.number_input("Trading Capital (₹)", min_value=10_000,
+                               max_value=10_000_000, value=100_000, step=10_000)
+    risk_per_trade = st.slider("Risk per Trade (%)", 0.5, 3.0, 2.0, 0.25)
 
     st.divider()
 
-    universe_choice = st.selectbox(
-        "Stock Universe",
-        options=["NIFTY 50 (Safest)", "NIFTY 50 + Next 50", "Full Universe (Slower)"],
-        index=1,
-    )
-
+    universe_choice = st.selectbox("Stock Universe", options=[
+        "NIFTY 50 (Safest)", "NIFTY 50 + Next 50", "Full Universe (Slower)"])
     universe_map = {
         "NIFTY 50 (Safest)": NIFTY_50,
         "NIFTY 50 + Next 50": NIFTY_50 + NIFTY_NEXT_50,
@@ -93,21 +68,21 @@ with st.sidebar:
     st.info(
         f"**Capital:** ₹{capital:,.0f}\n\n"
         f"**Max risk/trade:** ₹{capital * risk_per_trade / 100:,.0f}\n\n"
-        f"**Max positions:** 10\n\n"
         f"**Stocks in scan:** {len(selected_universe)}"
     )
-    st.divider()
-    st.caption("Data from Yahoo Finance. Refresh every 15 min. Not SEBI-registered advice.")
+    st.caption("Data: Yahoo Finance · Refreshed every 15 min · Not SEBI-registered advice.")
 
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "🏠 Dashboard",
-    "🔍 Stock Screener",
+    "🔍 Screener",
     "📊 Stock Analysis",
-    "💼 Portfolio Tracker",
-    "🔢 Risk Calculator",
+    "🕯️ Intraday",
+    "🔬 Backtest",
+    "💼 Portfolio",
+    "🔔 Alerts",
 ])
 
 
@@ -116,75 +91,67 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 # ═══════════════════════════════════════════════════════════════════════════════
 
 with tab1:
-    st.markdown('<div class="main-header">NSE Trading System</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">NSE Trading System v2</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="sub-header">Multi-strategy technical screening for NSE stocks · '
-        'Data refreshes every 15 minutes</div>',
-        unsafe_allow_html=True,
-    )
+        '<div class="sub-header">4 strategies · Backtest · Intraday charts · '
+        'Telegram alerts · Persistent portfolio</div>', unsafe_allow_html=True)
 
     col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Capital", f"₹{capital:,.0f}")
-    with col2:
-        st.metric("Risk/Trade", f"{risk_per_trade}% = ₹{capital * risk_per_trade / 100:,.0f}")
-    with col3:
-        st.metric("Universe", f"{len(selected_universe)} stocks")
-    with col4:
-        st.metric("Max Positions", "10 concurrent")
+    col1.metric("Capital", f"₹{capital:,.0f}")
+    col2.metric("Risk/Trade", f"{risk_per_trade}% = ₹{capital * risk_per_trade / 100:,.0f}")
+    col3.metric("Universe", f"{len(selected_universe)} stocks")
+    col4.metric("Max Positions", "10 concurrent")
 
     st.divider()
 
-    st.markdown("### How This System Works")
+    # NIFTY 50 benchmark
+    st.markdown("### NIFTY 50 Benchmark")
+    with st.spinner("Fetching NIFTY data..."):
+        nifty_df = fetch_ohlcv("^NSEI", period="6mo")
+
+    if nifty_df is not None:
+        nifty_ret_1m = round((nifty_df["Close"].iloc[-1] / nifty_df["Close"].iloc[-22] - 1) * 100, 2)
+        nifty_ret_3m = round((nifty_df["Close"].iloc[-1] / nifty_df["Close"].iloc[-63] - 1) * 100, 2)
+        nifty_price = round(nifty_df["Close"].iloc[-1], 2)
+        nb1, nb2, nb3 = st.columns(3)
+        nb1.metric("NIFTY 50", f"{nifty_price:,.2f}")
+        nb2.metric("1M Return", f"{nifty_ret_1m:+.1f}%")
+        nb3.metric("3M Return", f"{nifty_ret_3m:+.1f}%")
+
+        fig_nifty = go.Figure()
+        fig_nifty.add_trace(go.Scatter(
+            x=[str(d.date()) for d in nifty_df.tail(120).index],
+            y=nifty_df["Close"].tail(120).tolist(),
+            line=dict(color="#1f77b4", width=2),
+            fill="tozeroy", fillcolor="rgba(31,119,180,0.08)",
+            name="NIFTY 50"
+        ))
+        fig_nifty.update_layout(height=220, margin=dict(l=0, r=0, t=10, b=0),
+                                  showlegend=False, plot_bgcolor="white")
+        st.plotly_chart(fig_nifty, use_container_width=True)
+    else:
+        st.info("NIFTY benchmark unavailable — check internet connection.")
+
+    st.divider()
+    st.markdown("### Strategies at a Glance")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.markdown("""
-        **Strategy 1 — Golden Cross Trend**
-
-        EMA 50 crosses above EMA 200. Price stays above EMA 20. MACD bullish.
-        ADX > 20 confirms a real trend — not just noise.
-        """)
+        st.markdown("**Golden Cross**\nEMA50 > EMA200 + price > EMA20 + MACD bullish.\n*Hold: 4–12 weeks*")
     with c2:
-        st.markdown("""
-        **Strategy 2 — MACD Momentum**
-
-        MACD line freshly crosses above signal line. RSI between 40–68 (healthy,
-        not overbought). Good for catching early momentum moves.
-        """)
+        st.markdown("**MACD Momentum**\nFresh MACD crossover + RSI 40–68.\n*Hold: 2–6 weeks*")
     with c3:
-        st.markdown("""
-        **Strategy 3 — Volume Breakout**
-
-        Price breaks above 20-day high with volume 1.4× its average.
-        High volume confirms institutional participation — not a fakeout.
-        """)
+        st.markdown("**Volume Breakout**\nPrice > 20D high + volume > 1.4× avg.\n*Hold: 1–4 weeks*")
     with c4:
-        st.markdown("""
-        **Strategy 4 — Oversold Bounce**
-
-        RSI drops below 38 (oversold) and MACD starts turning bullish. Best
-        for catching reversals in quality large-cap stocks.
-        """)
+        st.markdown("**Oversold Bounce**\nRSI < 38 + MACD turning up.\n*Hold: 1–3 weeks*")
 
     st.divider()
-    st.markdown("### Risk Management Rules You Must Follow")
     r1, r2, r3 = st.columns(3)
     with r1:
-        st.error("**Never risk > 2% per trade**\nSet stop-loss before you enter. No trade without a stop.")
+        st.error("**Never risk > 2% per trade**\nSet stop-loss before entering.")
     with r2:
-        st.warning("**Minimum 1:2 Risk:Reward**\nOnly take a trade if potential gain is 2× your risk.")
+        st.warning("**Minimum 1:2 Risk:Reward**\nTarget must be ≥ 2× your risk.")
     with r3:
-        st.success("**Book 50% at Target 1**\nLet rest ride with trailing stop. Never let a profit turn into a loss.")
-
-    st.divider()
-    st.markdown("### NSE Market Timings")
-    t1, t2, t3 = st.columns(3)
-    with t1:
-        st.info("**Pre-Market:** 9:00 AM – 9:15 AM\nBid/ask orders collected. Price discovery happens here.")
-    with t2:
-        st.info("**Market Hours:** 9:15 AM – 3:30 PM\nMain trading session. Best liquidity 9:15–11 AM and 2:30–3:30 PM.")
-    with t3:
-        st.info("**Post-Market:** 3:40 PM – 4:00 PM\nClosing session. Use for limit orders at closing price.")
+        st.success("**Book 50% at Target 1**\nLet rest ride with trailing stop.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -193,81 +160,81 @@ with tab1:
 
 with tab2:
     st.markdown("## Stock Screener")
-    st.caption("Scans all stocks, scores them 0–100, and surfaces the best buy opportunities.")
+    st.caption("Batch-fetches all data then scores 0–100. Typical scan: 60–90 seconds.")
 
     col_a, col_b, col_c = st.columns([2, 2, 1])
     with col_a:
-        strategy_filter = st.selectbox(
-            "Filter by Strategy",
-            options=["All Strategies", "Golden Cross Trend", "MACD Momentum",
-                     "Volume Breakout", "Oversold Bounce"],
-        )
+        strategy_filter = st.selectbox("Filter by Strategy", [
+            "All Strategies", "Golden Cross Trend", "MACD Momentum",
+            "Volume Breakout", "Oversold Bounce"])
     with col_b:
         sector_options = ["All Sectors", "Banking", "IT", "FMCG", "Pharma", "Auto",
                           "Energy", "Metals", "Infra", "NBFC", "Insurance", "Cement", "Consumer"]
         sector_filter = st.selectbox("Filter by Sector", sector_options)
     with col_c:
-        min_score = st.number_input("Min Score", min_value=0, max_value=100, value=50)
+        min_score = st.number_input("Min Score", 0, 100, 50)
 
-    run_col, _ = st.columns([1, 4])
-    with run_col:
-        run_btn = st.button("🔍 Run Screener", type="primary", use_container_width=True)
+    run_btn = st.button("🔍 Run Screener", type="primary")
 
     if "screener_df" not in st.session_state:
         st.session_state.screener_df = pd.DataFrame()
         st.session_state.screener_summary = {}
 
     if run_btn:
-        progress_bar = st.progress(0, text="Scanning stocks...")
-        status_text = st.empty()
+        progress_bar = st.progress(0, text="Starting scan...")
 
         def update_progress(done, total):
-            pct = done / total
-            progress_bar.progress(pct, text=f"Scanning {done}/{total} stocks...")
+            progress_bar.progress(done / total, text=f"Scanning {done}/{total}...")
 
-        with st.spinner("Fetching data and running analysis..."):
+        with st.spinner("Fetching and analysing..."):
             df_all = run_screener(selected_universe, progress_callback=update_progress)
 
         progress_bar.empty()
-        status_text.empty()
-
         st.session_state.screener_df = df_all
         st.session_state.screener_summary = get_summary_stats(df_all)
-        st.success(f"Screened {len(df_all)} stocks successfully!")
+
+        # Auto-send Telegram alerts if configured
+        if (st.session_state.get("tg_token") and st.session_state.get("tg_chat_id")
+                and not df_all.empty):
+            top = df_all.head(20).to_dict("records")
+            sent, errs = send_bulk_alerts(
+                st.session_state["tg_token"],
+                st.session_state["tg_chat_id"],
+                top,
+                min_score=65,
+            )
+            if sent:
+                st.success(f"📲 Sent {sent} Telegram alert(s)!")
+
+        st.success(f"Screened {len(df_all)} stocks!")
 
     if not st.session_state.screener_df.empty:
         df_display = st.session_state.screener_df.copy()
         summary = st.session_state.screener_summary
 
-        # Summary metrics
         m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("Total Screened", summary.get("total_screened", 0))
-        m2.metric("Strong Buy", summary.get("strong_buy", 0), delta_color="normal")
+        m1.metric("Screened", summary.get("total_screened", 0))
+        m2.metric("Strong Buy", summary.get("strong_buy", 0))
         m3.metric("Buy", summary.get("buy", 0))
         m4.metric("Watch", summary.get("watch", 0))
         m5.metric("Avg Score", summary.get("avg_score", 0))
 
         st.divider()
 
-        # Strategy signal counts chart
+        # Strategy distribution
         strat_data = {
             "Golden Cross": summary.get("golden_cross_count", 0),
             "MACD Momentum": summary.get("macd_momentum_count", 0),
             "Breakout": summary.get("breakout_count", 0),
             "Oversold Bounce": summary.get("oversold_bounce_count", 0),
         }
-        fig_strat = px.bar(
-            x=list(strat_data.keys()),
-            y=list(strat_data.values()),
-            title="Stocks Triggering Each Strategy",
-            labels={"x": "Strategy", "y": "Count"},
-            color=list(strat_data.values()),
-            color_continuous_scale="Blues",
-        )
-        fig_strat.update_layout(height=300, showlegend=False, coloraxis_showscale=False)
+        fig_strat = px.bar(x=list(strat_data.keys()), y=list(strat_data.values()),
+                           title="Stocks Triggering Each Strategy",
+                           color=list(strat_data.values()), color_continuous_scale="Blues")
+        fig_strat.update_layout(height=280, showlegend=False, coloraxis_showscale=False)
         st.plotly_chart(fig_strat, use_container_width=True)
 
-        # Apply filters
+        # Filters
         if strategy_filter != "All Strategies":
             df_display = filter_by_strategy(df_display, strategy_filter)
         if sector_filter != "All Sectors":
@@ -276,14 +243,13 @@ with tab2:
 
         st.markdown(f"### Results — {len(df_display)} stocks")
 
-        # Colour the signal column
         def signal_color(val):
             colors = {
-                "STRONG BUY": "background-color: #c8e6c9; color: #1b5e20; font-weight:bold",
-                "BUY": "background-color: #dcedc8; color: #33691e",
-                "WATCH": "background-color: #fff9c4; color: #f57f17",
-                "NEUTRAL": "background-color: #f5f5f5; color: #616161",
-                "AVOID": "background-color: #ffcdd2; color: #b71c1c",
+                "STRONG BUY": "background-color:#c8e6c9;color:#1b5e20;font-weight:bold",
+                "BUY": "background-color:#dcedc8;color:#33691e",
+                "WATCH": "background-color:#fff9c4;color:#f57f17",
+                "NEUTRAL": "background-color:#f5f5f5;color:#616161",
+                "AVOID": "background-color:#ffcdd2;color:#b71c1c",
             }
             return colors.get(val, "")
 
@@ -291,283 +257,451 @@ with tab2:
                      "macd_bullish", "golden_cross", "breakout",
                      "ret_1m", "ret_3m", "vol_ratio"]
         cols_available = [c for c in cols_show if c in df_display.columns]
-
         renamed = {
             "name": "Stock", "sector": "Sector", "price": "Price (₹)",
             "score": "Score", "signal": "Signal", "rsi": "RSI",
             "adx": "ADX", "macd_bullish": "MACD↑", "golden_cross": "GoldenX",
-            "breakout": "Breakout", "ret_1m": "1M %", "ret_3m": "3M %",
-            "vol_ratio": "Vol Ratio",
+            "breakout": "Breakout", "ret_1m": "1M %", "ret_3m": "3M %", "vol_ratio": "Vol Ratio",
         }
-
         display_df = df_display[cols_available].rename(columns=renamed)
-        styled = display_df.style.map(signal_color, subset=["Signal"])
-        st.dataframe(styled, use_container_width=True, height=450)
+        st.dataframe(display_df.style.map(signal_color, subset=["Signal"]),
+                     use_container_width=True, height=420)
 
-        # Sector distribution of buy signals
+        # Sector pie
         buy_stocks = df_display[df_display["signal"].isin(["BUY", "STRONG BUY"])]
         if not buy_stocks.empty and "sector" in buy_stocks.columns:
             sector_counts = buy_stocks["sector"].value_counts()
-            fig_sector = px.pie(
-                values=sector_counts.values,
-                names=sector_counts.index,
-                title="Sector Distribution of Buy Signals",
-                hole=0.4,
-            )
-            fig_sector.update_layout(height=350)
+            fig_sector = px.pie(values=sector_counts.values, names=sector_counts.index,
+                                title="Sector Distribution of Buy Signals", hole=0.4)
+            fig_sector.update_layout(height=320)
             st.plotly_chart(fig_sector, use_container_width=True)
 
     else:
-        st.info("Click **Run Screener** to scan the selected universe of stocks.")
+        st.info("Click **Run Screener** to start.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — STOCK ANALYSIS
+# TAB 3 — STOCK ANALYSIS (Daily)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 with tab3:
-    st.markdown("## Individual Stock Analysis")
+    st.markdown("## Stock Analysis — Daily")
 
-    symbol_input = st.text_input(
-        "Enter NSE Symbol (e.g. RELIANCE, TCS, INFY)",
-        value="RELIANCE",
-        help="Type the NSE ticker without .NS suffix.",
-    ).strip().upper()
+    symbol_input = st.text_input("NSE Symbol (e.g. RELIANCE, TCS)", value="RELIANCE",
+                                  key="daily_sym").strip().upper()
+    show_fundamentals = st.checkbox("Show Fundamental Data (P/E, Market Cap)", value=True)
+    analyse_btn = st.button("📊 Analyse", type="primary", key="analyse_daily")
 
-    analyze_btn = st.button("📊 Analyse", type="primary")
-
-    if analyze_btn and symbol_input:
+    if analyse_btn and symbol_input:
         full_symbol = f"{symbol_input}.NS"
-        with st.spinner(f"Fetching data for {symbol_input}..."):
+        with st.spinner(f"Fetching {symbol_input}..."):
             df_stock = fetch_ohlcv(full_symbol, period="1y", force_refresh=True)
+            fund_info = get_ticker_info(full_symbol) if show_fundamentals else {}
 
         if df_stock is None:
-            st.error(f"Could not fetch data for **{symbol_input}**. Check the symbol and try again.")
+            st.error(f"No data for **{symbol_input}**.")
         else:
             result = analyze(df_stock)
             stats = get_52_week_stats(df_stock)
+            st.session_state[f"analysis_{symbol_input}"] = (result, stats, df_stock, fund_info)
 
-            # Store in session state for reuse
-            st.session_state[f"analysis_{symbol_input}"] = (result, stats, df_stock)
-
-    # Display from session state
     session_key = f"analysis_{symbol_input}"
     if session_key in st.session_state:
-        result, stats, df_stock = st.session_state[session_key]
+        result, stats, df_stock, fund_info = st.session_state[session_key]
+        price = result["price"]
 
-        # ── Header ──
-        signal_colors = {
-            "STRONG BUY": "🟢", "BUY": "🟩", "WATCH": "🟡",
-            "NEUTRAL": "⬜", "AVOID": "🔴",
-        }
-        sig_icon = signal_colors.get(result["signal"], "⬜")
-        st.markdown(f"### {symbol_input}  {sig_icon} {result['signal']}  (Score: {result['score']}/100)")
+        sig_icons = {"STRONG BUY": "🟢", "BUY": "🟩", "WATCH": "🟡", "NEUTRAL": "⬜", "AVOID": "🔴"}
+        st.markdown(f"### {symbol_input}  {sig_icons.get(result['signal'], '')} "
+                    f"{result['signal']}  (Score: {result['score']}/100)")
 
-        # ── Key metrics row ──
+        # Fundamentals row
+        if fund_info:
+            f1, f2, f3, f4 = st.columns(4)
+            pe = fund_info.get("pe_ratio")
+            mcap = fund_info.get("market_cap")
+            beta = fund_info.get("beta")
+            div = fund_info.get("dividend_yield")
+            f1.metric("P/E Ratio", f"{pe:.1f}" if pe else "N/A")
+            f2.metric("Market Cap", f"₹{mcap/1e12:.2f}T" if mcap and mcap > 1e12
+                       else (f"₹{mcap/1e9:.0f}B" if mcap else "N/A"))
+            f3.metric("Beta", f"{beta:.2f}" if beta else "N/A",
+                      help="Beta > 1 = more volatile than NIFTY")
+            f4.metric("Dividend Yield", f"{div*100:.1f}%" if div else "N/A")
+            st.divider()
+
+        # Technicals
         col1, col2, col3, col4, col5, col6 = st.columns(6)
-        col1.metric("Price", f"₹{result['price']:,.2f}")
+        col1.metric("Price", f"₹{price:,.2f}")
         col2.metric("RSI (14)", result["rsi"],
-                    delta="Oversold" if result["rsi_oversold"] else ("Overbought" if result["rsi_overbought"] else None))
-        col3.metric("ADX", result["adx"], delta="Trending" if result["strong_trend"] else None)
+                    delta="Overbought" if result["rsi_overbought"] else
+                    ("Oversold" if result["rsi_oversold"] else None))
+        col3.metric("ADX", result["adx"],
+                    delta="Strong trend" if result["strong_trend"] else None)
         col4.metric("1M Return", f"{result['ret_1m']:+.1f}%")
         col5.metric("3M Return", f"{result['ret_3m']:+.1f}%")
         col6.metric("Vol Ratio", f"{result['vol_ratio']:.1f}x")
 
+        # Relative strength vs NIFTY
+        nifty_df = fetch_ohlcv("^NSEI", period="3mo")
+        if nifty_df is not None and len(df_stock) >= 63:
+            nifty_ret = (nifty_df["Close"].iloc[-1] / nifty_df["Close"].iloc[-63] - 1) * 100
+            rs = result["ret_3m"] - nifty_ret
+            rs_label = f"{rs:+.1f}% vs NIFTY"
+            rs_color = "normal" if rs > 0 else "inverse"
+            col4.metric("RS vs NIFTY (3M)", rs_label)
+
         st.divider()
 
-        # ── 52-week stats ──
+        # 52-week
         wk1, wk2, wk3, wk4 = st.columns(4)
         wk1.metric("52W High", f"₹{stats['high_52w']:,.2f}")
         wk2.metric("52W Low", f"₹{stats['low_52w']:,.2f}")
         wk3.metric("Current", f"₹{stats['current']:,.2f}")
-        wk4.metric("Position in Range", f"{stats['position_pct']}%")
+        wk4.metric("In 52W Range", f"{stats['position_pct']}%")
 
         st.divider()
 
-        # ── Price chart with EMAs ──
+        # Chart
         dates = result["dates_series"]
-        closes = result["close_series"]
-        ema20s = result["ema20_series"]
-        ema50s = result["ema50_series"]
+        fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
+                            row_heights=[0.55, 0.25, 0.20],
+                            vertical_spacing=0.03,
+                            subplot_titles=["Price + EMA 20/50", "RSI (14)", "MACD Histogram"])
 
-        fig = make_subplots(
-            rows=3, cols=1,
-            shared_xaxes=True,
-            row_heights=[0.55, 0.25, 0.20],
-            vertical_spacing=0.03,
-            subplot_titles=["Price + EMAs", "RSI (14)", "MACD Histogram"],
-        )
-
-        # Candlestick
         df_tail = df_stock.tail(60)
         fig.add_trace(go.Candlestick(
             x=[str(d.date()) for d in df_tail.index],
             open=df_tail["Open"], high=df_tail["High"],
             low=df_tail["Low"], close=df_tail["Close"],
-            name="Price", increasing_line_color="#26a69a",
-            decreasing_line_color="#ef5350",
+            name="Price", increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
         ), row=1, col=1)
-
-        fig.add_trace(go.Scatter(x=dates, y=ema20s, name="EMA 20",
+        fig.add_trace(go.Scatter(x=dates, y=result["ema20_series"], name="EMA 20",
                                   line=dict(color="#1f77b4", width=1.5)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=dates, y=ema50s, name="EMA 50",
+        fig.add_trace(go.Scatter(x=dates, y=result["ema50_series"], name="EMA 50",
                                   line=dict(color="#ff7f0e", width=1.5)), row=1, col=1)
 
-        # RSI
         rsi_series = result["rsi_series"]
-        rsi_colors = ["#ef5350" if v > 70 else "#26a69a" if v < 30 else "#1f77b4" for v in rsi_series]
         fig.add_trace(go.Scatter(x=dates, y=rsi_series, name="RSI",
                                   line=dict(color="#9c27b0", width=2)), row=2, col=1)
         fig.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.5, row=2, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.5, row=2, col=1)
-        fig.add_hline(y=50, line_dash="dot", line_color="gray", opacity=0.3, row=2, col=1)
 
-        # MACD Histogram
         macd_hist = result["macd_hist_series"]
         macd_colors = ["#26a69a" if v >= 0 else "#ef5350" for v in macd_hist]
         fig.add_trace(go.Bar(x=dates, y=macd_hist, name="MACD Hist",
                               marker_color=macd_colors), row=3, col=1)
 
-        fig.update_layout(
-            height=700,
-            xaxis_rangeslider_visible=False,
-            showlegend=True,
-            plot_bgcolor="white",
-            paper_bgcolor="white",
-        )
+        fig.update_layout(height=680, xaxis_rangeslider_visible=False,
+                          plot_bgcolor="white", paper_bgcolor="white")
         st.plotly_chart(fig, use_container_width=True)
 
-        # ── Signal summary ──
+        # Signals
         st.markdown("### Signal Summary")
-        sig_col1, sig_col2 = st.columns(2)
-        with sig_col1:
+        sig1, sig2 = st.columns(2)
+        with sig1:
             st.markdown("**Bullish signals:**")
-            signals_bull = [
+            for name, val in [
                 ("Golden Cross (EMA50 > EMA200)", result["golden_cross"]),
                 ("Price above EMA 200", result["price_above_ema200"]),
                 ("MACD Bullish", result["macd_bullish"]),
                 ("Fresh MACD Crossover", result["macd_crossover"]),
                 ("Volume Breakout", result["breakout"]),
                 ("Strong Trend (ADX > 25)", result["strong_trend"]),
-                ("BB Squeeze (pending move)", result["bb_squeeze"]),
-            ]
-            for name, val in signals_bull:
-                icon = "✅" if val else "❌"
-                st.markdown(f"{icon} {name}")
+                ("Bollinger Band Squeeze", result["bb_squeeze"]),
+            ]:
+                st.markdown(f"{'✅' if val else '❌'} {name}")
+        with sig2:
+            st.markdown("**EMA levels:**")
+            st.markdown(f"EMA20: ₹{result['ema20']:,.2f}")
+            st.markdown(f"EMA50: ₹{result['ema50']:,.2f}")
+            st.markdown(f"EMA200: ₹{result['ema200']:,.2f}")
+            st.markdown(f"\n**Caution:**")
+            st.markdown(f"{'⚠️' if result['rsi_overbought'] else '✅'} "
+                        f"RSI Overbought: {'Yes — skip entry' if result['rsi_overbought'] else 'No'}")
 
-        with sig_col2:
-            st.markdown("**Caution signals:**")
-            st.markdown(f"{'⚠️' if result['rsi_overbought'] else '✅'} RSI Overbought (>{75}): "
-                        f"{'Yes — Avoid buying' if result['rsi_overbought'] else 'No'}")
-            st.markdown(f"{'⚠️' if result['rsi_oversold'] else 'ℹ️'} RSI Oversold (<35): "
-                        f"{'Yes — Bounce possible' if result['rsi_oversold'] else 'No'}")
-            st.markdown(f"\n**EMA Alignment:**")
-            st.markdown(f"EMA20: ₹{result['ema20']:,.2f} | "
-                        f"EMA50: ₹{result['ema50']:,.2f} | "
-                        f"EMA200: ₹{result['ema200']:,.2f}")
-
-        # ── Trade setup ──
+        # Trade setup
         st.divider()
-        st.markdown("### Suggested Trade Setup")
-        setup = calculate_trade_setup(
-            symbol=symbol_input,
-            entry_price=result["price"],
-            atr=result["atr"],
-            capital=capital,
-            risk_per_trade_pct=risk_per_trade,
-            signal=result["signal"],
-            score=result["score"],
-        )
-
+        st.markdown("### Trade Setup")
+        setup = calculate_trade_setup(symbol_input, price, result["atr"], capital,
+                                       risk_per_trade, result["signal"], result["score"])
         ts1, ts2, ts3, ts4, ts5 = st.columns(5)
-        ts1.metric("Entry Price", f"₹{setup.entry_price:,.2f}")
+        ts1.metric("Entry", f"₹{setup.entry_price:,.2f}")
         ts2.metric("Stop-Loss", f"₹{setup.stop_loss:,.2f}",
-                   delta=f"-{((setup.entry_price - setup.stop_loss)/setup.entry_price*100):.1f}%",
+                   delta=f"-{((setup.entry_price-setup.stop_loss)/setup.entry_price*100):.1f}%",
                    delta_color="inverse")
         ts3.metric("Target 1 (1:2)", f"₹{setup.target_1:,.2f}",
-                   delta=f"+{((setup.target_1 - setup.entry_price)/setup.entry_price*100):.1f}%")
+                   delta=f"+{((setup.target_1-setup.entry_price)/setup.entry_price*100):.1f}%")
         ts4.metric("Target 2 (1:3)", f"₹{setup.target_2:,.2f}",
-                   delta=f"+{((setup.target_2 - setup.entry_price)/setup.entry_price*100):.1f}%")
-        ts5.metric("Quantity", f"{setup.quantity} shares")
+                   delta=f"+{((setup.target_2-setup.entry_price)/setup.entry_price*100):.1f}%")
+        ts5.metric("Qty", f"{setup.quantity} shares")
 
-        ts_a, ts_b, ts_c = st.columns(3)
-        ts_a.metric("Capital at Risk", f"₹{setup.capital_at_risk:,.2f}", delta=f"{setup.risk_pct}% of capital")
-        ts_b.metric("Potential Gain T1", f"₹{setup.potential_gain_1:,.2f}")
-        ts_c.metric("Potential Gain T2", f"₹{setup.potential_gain_2:,.2f}")
+        ra, rb, rc = st.columns(3)
+        ra.metric("Capital at Risk", f"₹{setup.capital_at_risk:,.2f}",
+                  delta=f"{setup.risk_pct}% of capital")
+        rb.metric("Gain at T1", f"₹{setup.potential_gain_1:,.2f}")
+        rc.metric("Gain at T2", f"₹{setup.potential_gain_2:,.2f}")
 
-        st.markdown("**Trade Notes:**")
         for note in setup.notes:
             st.markdown(f"- {note}")
 
     else:
-        st.info("Enter an NSE symbol above and click **Analyse**.")
+        st.info("Enter a symbol and click **Analyse**.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 4 — PORTFOLIO TRACKER
+# TAB 4 — INTRADAY
 # ═══════════════════════════════════════════════════════════════════════════════
 
 with tab4:
+    st.markdown("## Intraday Chart")
+    st.caption("1-hour candles for last 60 days. Use for same-day entry timing.")
+
+    i_col1, i_col2 = st.columns([3, 1])
+    with i_col1:
+        intraday_sym = st.text_input("NSE Symbol", value="RELIANCE", key="intra_sym").strip().upper()
+    with i_col2:
+        intraday_tf = st.selectbox("Timeframe", ["1h", "30m", "15m"], index=0)
+
+    intraday_btn = st.button("📈 Load Chart", type="primary", key="intra_btn")
+
+    if intraday_btn and intraday_sym:
+        full_sym = f"{intraday_sym}.NS"
+        period_map = {"1h": "60d", "30m": "30d", "15m": "10d"}
+        period = period_map[intraday_tf]
+
+        with st.spinner(f"Fetching {intraday_tf} data for {intraday_sym}..."):
+            df_intra = fetch_ohlcv(full_sym, period=period, interval=intraday_tf, force_refresh=True)
+
+        if df_intra is None or df_intra.empty:
+            st.error(f"No intraday data for {intraday_sym}. Note: 15m data only for last 10 days.")
+        else:
+            st.session_state[f"intra_{intraday_sym}_{intraday_tf}"] = df_intra
+
+    intra_key = f"intra_{intraday_sym}_{intraday_tf}"
+    if intra_key in st.session_state:
+        df_intra = st.session_state[intra_key]
+        result_intra = analyze(df_intra)
+
+        i1, i2, i3, i4 = st.columns(4)
+        i1.metric("Current Price", f"₹{result_intra['price']:,.2f}")
+        i2.metric("RSI", result_intra["rsi"],
+                  delta="Overbought" if result_intra["rsi_overbought"] else
+                  ("Oversold" if result_intra["rsi_oversold"] else None))
+        i3.metric("Signal", result_intra["signal"])
+        i4.metric("Score", f"{result_intra['score']}/100")
+
+        st.divider()
+
+        # Intraday candlestick + volume
+        fig_i = make_subplots(rows=3, cols=1, shared_xaxes=True,
+                              row_heights=[0.55, 0.25, 0.20],
+                              vertical_spacing=0.03,
+                              subplot_titles=["Price + EMA 20/50", "RSI", "Volume"])
+
+        dates_i = [str(d) for d in df_intra.index]
+        tail_df = df_intra.tail(120)
+        tail_dates = [str(d) for d in tail_df.index]
+
+        fig_i.add_trace(go.Candlestick(
+            x=tail_dates,
+            open=tail_df["Open"], high=tail_df["High"],
+            low=tail_df["Low"], close=tail_df["Close"],
+            name="Price", increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
+        ), row=1, col=1)
+
+        ema20_i = result_intra["ema20_series"]
+        ema50_i = result_intra["ema50_series"]
+        dates_tail_60 = result_intra["dates_series"]
+        fig_i.add_trace(go.Scatter(x=dates_tail_60, y=ema20_i, name="EMA 20",
+                                    line=dict(color="#1f77b4", width=1.2)), row=1, col=1)
+        fig_i.add_trace(go.Scatter(x=dates_tail_60, y=ema50_i, name="EMA 50",
+                                    line=dict(color="#ff7f0e", width=1.2)), row=1, col=1)
+
+        fig_i.add_trace(go.Scatter(x=dates_tail_60, y=result_intra["rsi_series"],
+                                    line=dict(color="#9c27b0", width=1.5), name="RSI"), row=2, col=1)
+        fig_i.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.4, row=2, col=1)
+        fig_i.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.4, row=2, col=1)
+
+        vol_s = result_intra["volume_series"]
+        vol_ma_s = result_intra["vol_ma_series"]
+        fig_i.add_trace(go.Bar(x=dates_tail_60, y=vol_s, name="Volume",
+                                marker_color="#bbdefb"), row=3, col=1)
+        fig_i.add_trace(go.Scatter(x=dates_tail_60, y=vol_ma_s, name="Vol MA",
+                                    line=dict(color="#1565c0", width=1.5, dash="dash")), row=3, col=1)
+
+        fig_i.update_layout(height=680, xaxis_rangeslider_visible=False,
+                            plot_bgcolor="white", paper_bgcolor="white")
+        st.plotly_chart(fig_i, use_container_width=True)
+
+        st.info(
+            "**Intraday Trading Tips:**\n"
+            "- Best entry times: 9:30–10:30 AM and 1:30–3:00 PM\n"
+            "- Avoid entering in the first 15 minutes (9:15–9:30 AM) — too much volatility\n"
+            "- Volume bar above MA = institutional activity. Below MA = thin, avoid\n"
+            "- RSI crossing 50 upward on hourly chart = intraday bullish momentum"
+        )
+
+    else:
+        st.info("Enter a symbol and click **Load Chart**.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 5 — BACKTEST
+# ═══════════════════════════════════════════════════════════════════════════════
+
+with tab5:
+    st.markdown("## Strategy Backtester")
+    st.caption(
+        "Walk-forward backtest on 1 year of historical data. "
+        "Generates a signal on day N, measures return over next N hold days with stop-loss."
+    )
+
+    bt1, bt2, bt3 = st.columns(3)
+    with bt1:
+        bt_sym = st.text_input("NSE Symbol", value="TCS", key="bt_sym").strip().upper()
+    with bt2:
+        hold_days = st.slider("Hold Days (exit after N days)", 5, 30, 15)
+    with bt3:
+        sl_pct = st.slider("Stop-Loss %", 2.0, 10.0, 5.0, 0.5)
+
+    bt_btn = st.button("🔬 Run Backtest", type="primary", key="bt_btn")
+
+    if bt_btn and bt_sym:
+        with st.spinner(f"Backtesting {bt_sym} — fetching 2 years of data..."):
+            df_bt = fetch_ohlcv(f"{bt_sym}.NS", period="2y", force_refresh=True)
+
+        if df_bt is None or len(df_bt) < 250:
+            st.error(f"Insufficient data for {bt_sym}. Need at least 250 trading days.")
+        else:
+            results_bt = backtest_all_strategies(df_bt, hold_days=hold_days, stop_loss_pct=sl_pct)
+            st.session_state[f"bt_{bt_sym}"] = (results_bt, df_bt)
+
+    bt_key = f"bt_{bt_sym}"
+    if bt_key in st.session_state:
+        results_bt, df_bt = st.session_state[bt_key]
+
+        st.markdown(f"### {bt_sym} — Backtest Results (hold {hold_days}d, SL {sl_pct}%)")
+
+        # Summary table
+        summary_rows = []
+        for r in results_bt:
+            summary_rows.append({
+                "Strategy": r["strategy"],
+                "Trades": r["trades"],
+                "Win Rate": f"{r['win_rate']}%",
+                "Avg Return": f"{r['avg_return']:+.2f}%",
+                "Max Gain": f"{r['max_gain']:+.2f}%",
+                "Max Loss": f"{r['max_loss']:+.2f}%",
+                "Profit Factor": r["profit_factor"],
+            })
+        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True)
+
+        st.divider()
+
+        # Equity curves
+        st.markdown("### Equity Curves (₹1,00,000 starting capital)")
+        fig_eq = go.Figure()
+        colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
+        for i, r in enumerate(results_bt):
+            if r["trades"] > 0:
+                equity = compute_equity_curve(r["return_series"], 100_000)
+                max_dd = compute_max_drawdown(equity)
+                label = f"{r['strategy']} (WR:{r['win_rate']}% DD:{max_dd}%)"
+                fig_eq.add_trace(go.Scatter(
+                    y=equity, name=label,
+                    line=dict(color=colors[i], width=2)
+                ))
+        fig_eq.add_hline(y=100_000, line_dash="dash", line_color="gray", opacity=0.4)
+        fig_eq.update_layout(height=380, plot_bgcolor="white",
+                              yaxis_title="Portfolio Value (₹)", xaxis_title="Trade #")
+        st.plotly_chart(fig_eq, use_container_width=True)
+
+        # Detailed trade list for best strategy
+        best = max(results_bt, key=lambda r: r.get("win_rate", 0))
+        if best["trades"] > 0:
+            st.markdown(f"### Trade Log — {best['strategy']}")
+            trade_df = pd.DataFrame(best["trade_list"])
+
+            def ret_color(val):
+                if isinstance(val, (int, float)):
+                    return "color:#26a69a;font-weight:bold" if val > 0 else "color:#ef5350;font-weight:bold"
+                return ""
+
+            st.dataframe(
+                trade_df.style.map(ret_color, subset=["return_pct"]),
+                use_container_width=True,
+                height=300,
+            )
+
+        st.info(
+            "**How to read this:**\n"
+            "- Win Rate > 50% with Profit Factor > 1.5 = strategy is working on this stock\n"
+            "- Check Max Loss — if > 2× Avg Return, the strategy is risky\n"
+            "- Equity curve going up-right = strategy profitable over time\n"
+            "- Max Drawdown % = worst peak-to-trough loss — keep this < 20%"
+        )
+
+    else:
+        st.info("Enter a symbol and click **Run Backtest**.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 6 — PORTFOLIO
+# ═══════════════════════════════════════════════════════════════════════════════
+
+with tab6:
     st.markdown("## Portfolio Tracker")
-    st.caption("Track your open positions and monitor portfolio health.")
+    st.caption("Positions are saved to disk — survive page refreshes.")
 
     if "portfolio" not in st.session_state:
-        st.session_state.portfolio = []
+        st.session_state.portfolio = load_portfolio()
 
-    # Add position form
-    with st.expander("➕ Add New Position", expanded=len(st.session_state.portfolio) == 0):
+    with st.expander("➕ Add Position", expanded=len(st.session_state.portfolio) == 0):
         p1, p2, p3, p4, p5 = st.columns(5)
         p_symbol = p1.text_input("Symbol", key="p_sym", placeholder="e.g. TCS")
         p_sector = p2.selectbox("Sector", ["Banking", "IT", "FMCG", "Pharma", "Auto",
                                              "Energy", "Metals", "Infra", "NBFC",
                                              "Insurance", "Cement", "Consumer", "Other"], key="p_sec")
-        p_entry = p3.number_input("Entry Price (₹)", min_value=1.0, value=100.0, key="p_entry")
+        p_entry = p3.number_input("Entry (₹)", min_value=1.0, value=100.0, key="p_entry")
         p_sl = p4.number_input("Stop-Loss (₹)", min_value=1.0, value=90.0, key="p_sl")
-        p_qty = p5.number_input("Quantity", min_value=1, value=10, key="p_qty")
+        p_qty = p5.number_input("Qty", min_value=1, value=10, key="p_qty")
 
         if st.button("Add Position", key="add_pos"):
             if p_symbol and p_entry > p_sl:
-                # Try to fetch current price
                 current_price = p_entry
                 try:
-                    df_temp = fetch_ohlcv(f"{p_symbol.upper()}.NS", period="5d")
-                    if df_temp is not None:
-                        current_price = float(df_temp["Close"].iloc[-1])
+                    df_tmp = fetch_ohlcv(f"{p_symbol.upper()}.NS", period="5d")
+                    if df_tmp is not None:
+                        current_price = float(df_tmp["Close"].iloc[-1])
                 except Exception:
                     pass
 
-                st.session_state.portfolio.append({
-                    "symbol": p_symbol.upper(),
-                    "sector": p_sector,
-                    "entry": p_entry,
-                    "current": current_price,
-                    "quantity": int(p_qty),
-                    "stop_loss": p_sl,
-                })
-                st.success(f"Added {p_symbol.upper()} to portfolio!")
+                new_pos = {
+                    "symbol": p_symbol.upper(), "sector": p_sector,
+                    "entry": p_entry, "current": current_price,
+                    "quantity": int(p_qty), "stop_loss": p_sl,
+                }
+                st.session_state.portfolio = add_position(st.session_state.portfolio, new_pos)
+                st.success(f"Added {p_symbol.upper()}!")
                 st.rerun()
             else:
                 st.error("Entry must be above stop-loss.")
 
     if st.session_state.portfolio:
-        # Build display DataFrame
+        # Build rows
         rows = []
         for pos in st.session_state.portfolio:
             invested = pos["entry"] * pos["quantity"]
             current_val = pos["current"] * pos["quantity"]
             pnl = current_val - invested
-            pnl_pct = (pnl / invested) * 100 if invested > 0 else 0
+            pnl_pct = (pnl / invested * 100) if invested > 0 else 0
             at_risk = (pos["entry"] - pos["stop_loss"]) * pos["quantity"]
             rows.append({
-                "Symbol": pos["symbol"],
-                "Sector": pos["sector"],
-                "Entry (₹)": pos["entry"],
-                "Current (₹)": pos["current"],
-                "Qty": pos["quantity"],
-                "Stop-Loss (₹)": pos["stop_loss"],
+                "Symbol": pos["symbol"], "Sector": pos["sector"],
+                "Entry (₹)": pos["entry"], "Current (₹)": pos["current"],
+                "Qty": pos["quantity"], "Stop-Loss (₹)": pos["stop_loss"],
                 "Invested (₹)": round(invested, 2),
-                "P&L (₹)": round(pnl, 2),
-                "P&L (%)": round(pnl_pct, 2),
+                "P&L (₹)": round(pnl, 2), "P&L (%)": round(pnl_pct, 2),
                 "At Risk (₹)": round(at_risk, 2),
             })
 
@@ -575,158 +709,146 @@ with tab4:
 
         def pnl_color(val):
             if isinstance(val, (int, float)):
-                if val > 0:
-                    return "color: #26a69a; font-weight: bold"
-                elif val < 0:
-                    return "color: #ef5350; font-weight: bold"
+                if val > 0: return "color:#26a69a;font-weight:bold"
+                elif val < 0: return "color:#ef5350;font-weight:bold"
             return ""
 
-        styled_port = port_df.style.map(pnl_color, subset=["P&L (₹)", "P&L (%)"])
+        st.dataframe(
+            port_df.style.map(pnl_color, subset=["P&L (₹)", "P&L (%)"]),
+            use_container_width=True,
+        )
 
-        st.dataframe(styled_port, use_container_width=True)
-
-        # Portfolio summary
+        # Summary
         total_invested = sum(p["entry"] * p["quantity"] for p in st.session_state.portfolio)
         total_current = sum(p["current"] * p["quantity"] for p in st.session_state.portfolio)
         total_pnl = total_current - total_invested
         total_pnl_pct = (total_pnl / total_invested * 100) if total_invested > 0 else 0
 
         pm1, pm2, pm3, pm4 = st.columns(4)
-        pm1.metric("Total Invested", f"₹{total_invested:,.2f}")
+        pm1.metric("Invested", f"₹{total_invested:,.2f}")
         pm2.metric("Current Value", f"₹{total_current:,.2f}")
         pm3.metric("Total P&L", f"₹{total_pnl:+,.2f}", delta=f"{total_pnl_pct:+.1f}%")
         pm4.metric("Cash Remaining", f"₹{max(0, capital - total_invested):,.2f}")
 
         st.divider()
 
-        # Portfolio health check
+        # Health check
         health = portfolio_health_check(st.session_state.portfolio, capital)
-
         st.markdown("### Portfolio Health")
         hc1, hc2, hc3 = st.columns(3)
         hc1.metric("Open Positions", health["positions"])
         hc2.metric("Capital Deployed", f"{health['deployed_pct']}%")
         hc3.metric("Total Risk", f"{health['total_risk_pct']}%")
-
-        if health["issues"]:
-            for issue in health["issues"]:
-                st.error(f"⛔ {issue}")
-        if health["warnings"]:
-            for warning in health["warnings"]:
-                st.warning(f"⚠️ {warning}")
+        for issue in health["issues"]:
+            st.error(f"⛔ {issue}")
+        for warning in health["warnings"]:
+            st.warning(f"⚠️ {warning}")
         if not health["issues"] and not health["warnings"]:
-            st.success("✅ Portfolio health looks good!")
+            st.success("✅ Portfolio health is good!")
 
-        # Sector exposure chart
-        if health["sector_exposure"]:
-            sector_exp = health["sector_exposure"]
-            fig_exp = px.bar(
-                x=list(sector_exp.keys()),
-                y=list(sector_exp.values()),
-                title="Sector Exposure (% of Capital)",
-                labels={"x": "Sector", "y": "% of Capital"},
-                color=list(sector_exp.values()),
-                color_continuous_scale="RdYlGn_r",
-            )
-            fig_exp.add_hline(y=30, line_dash="dash", line_color="red",
-                               annotation_text="30% limit")
-            fig_exp.update_layout(height=300, coloraxis_showscale=False)
-            st.plotly_chart(fig_exp, use_container_width=True)
-
-        if st.button("Clear All Positions", type="secondary"):
-            st.session_state.portfolio = []
+        # Remove position
+        st.divider()
+        remove_sym = st.selectbox("Remove Position",
+                                   ["— select —"] + [p["symbol"] for p in st.session_state.portfolio])
+        if st.button("Remove", type="secondary") and remove_sym != "— select —":
+            st.session_state.portfolio = remove_position(st.session_state.portfolio, remove_sym)
             st.rerun()
 
     else:
-        st.info("No positions tracked yet. Add a position using the form above.")
+        st.info("No positions yet. Add one above.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 5 — RISK CALCULATOR
+# TAB 7 — ALERTS (Telegram)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-with tab5:
-    st.markdown("## Risk Calculator")
-    st.caption("Calculate position size and trade setup for any stock before you enter.")
+with tab7:
+    st.markdown("## Telegram Alerts")
+    st.caption("Get buy signal notifications on your phone after each screener run.")
 
-    rc1, rc2 = st.columns(2)
+    st.markdown("### Setup (one time)")
+    st.markdown("""
+1. Open Telegram → search **@BotFather** → send `/newbot` → follow steps → copy **Bot Token**
+2. Open your new bot, send `/start`
+3. Visit `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` to find your **Chat ID**
+    """)
 
-    with rc1:
-        st.markdown("### Position Sizer")
-        rc_entry = st.number_input("Entry Price (₹)", min_value=0.01, value=500.0, key="rc_entry")
-        rc_stop = st.number_input("Stop-Loss Price (₹)", min_value=0.01, value=475.0, key="rc_stop")
-        rc_risk = st.slider("Risk per Trade (%)", 0.5, 3.0, risk_per_trade, 0.25, key="rc_risk")
+    tg1, tg2 = st.columns(2)
+    with tg1:
+        tg_token = st.text_input("Bot Token", type="password",
+                                  value=st.session_state.get("tg_token", ""),
+                                  placeholder="123456789:ABCdef...")
+    with tg2:
+        tg_chat_id = st.text_input("Chat ID",
+                                    value=st.session_state.get("tg_chat_id", ""),
+                                    placeholder="e.g. 987654321")
 
-        if st.button("Calculate", key="rc_calc"):
-            if rc_entry > rc_stop:
-                result_rc = quick_position_size(capital, rc_entry, rc_stop, rc_risk)
-                st.success("**Trade Setup:**")
-                st.metric("Quantity to Buy", f"{result_rc['quantity']} shares")
-                st.metric("Position Value", f"₹{result_rc['position_value']:,.2f}")
-                st.metric("Capital at Risk", f"₹{result_rc['capital_at_risk']:,.2f} ({result_rc['risk_pct']}%)")
-                st.metric("% of Capital", f"{result_rc['position_pct']}%")
+    col_save, col_test = st.columns(2)
+    with col_save:
+        if st.button("💾 Save", type="primary"):
+            st.session_state["tg_token"] = tg_token
+            st.session_state["tg_chat_id"] = tg_chat_id
+            st.success("Saved! Alerts will fire automatically after each screener run.")
 
-                # Targets
-                risk_per_share = rc_entry - rc_stop
-                t1 = round(rc_entry + 2 * risk_per_share, 2)
-                t2 = round(rc_entry + 3 * risk_per_share, 2)
-                st.metric("Target 1 (1:2 R:R)", f"₹{t1:,.2f}", delta=f"+{((t1-rc_entry)/rc_entry*100):.1f}%")
-                st.metric("Target 2 (1:3 R:R)", f"₹{t2:,.2f}", delta=f"+{((t2-rc_entry)/rc_entry*100):.1f}%")
+    with col_test:
+        if st.button("📲 Send Test Message"):
+            if tg_token and tg_chat_id:
+                ok, msg = send_test_message(tg_token, tg_chat_id)
+                if ok:
+                    st.success(f"✅ {msg} Check your Telegram!")
+                else:
+                    st.error(f"❌ {msg}")
             else:
-                st.error("Entry price must be above stop-loss price.")
-
-    with rc2:
-        st.markdown("### Risk:Reward Visualizer")
-
-        # Interactive scenario builder
-        viz_entry = st.number_input("Entry", value=500.0, key="viz_entry")
-        viz_stop = st.number_input("Stop", value=475.0, key="viz_stop")
-        viz_target = st.number_input("Target (your goal)", value=550.0, key="viz_target")
-
-        if viz_entry > viz_stop and viz_target > viz_entry:
-            risk = viz_entry - viz_stop
-            reward = viz_target - viz_entry
-            rr_ratio = reward / risk if risk > 0 else 0
-            qty_rr = quick_position_size(capital, viz_entry, viz_stop, risk_per_trade)
-
-            fig_rr = go.Figure()
-            fig_rr.add_hline(y=viz_stop, line_color="red", line_dash="dash",
-                              annotation_text=f"Stop ₹{viz_stop}", annotation_position="right")
-            fig_rr.add_hline(y=viz_entry, line_color="gray",
-                              annotation_text=f"Entry ₹{viz_entry}", annotation_position="right")
-            fig_rr.add_hline(y=viz_target, line_color="green", line_dash="dash",
-                              annotation_text=f"Target ₹{viz_target}", annotation_position="right")
-
-            fig_rr.add_vrect(x0=0, x1=1, y0=viz_stop, y1=viz_entry,
-                             fillcolor="red", opacity=0.1, layer="below")
-            fig_rr.add_vrect(x0=0, x1=1, y0=viz_entry, y1=viz_target,
-                             fillcolor="green", opacity=0.1, layer="below")
-
-            fig_rr.update_layout(
-                title=f"Risk:Reward = 1:{rr_ratio:.1f}",
-                yaxis_title="Price (₹)",
-                height=350,
-                showlegend=False,
-                xaxis=dict(showticklabels=False),
-            )
-            st.plotly_chart(fig_rr, use_container_width=True)
-
-            rr_color = "success" if rr_ratio >= 2 else "warning" if rr_ratio >= 1.5 else "error"
-            if rr_color == "success":
-                st.success(f"R:R = 1:{rr_ratio:.1f} ✅ Good trade — proceed with confidence.")
-            elif rr_color == "warning":
-                st.warning(f"R:R = 1:{rr_ratio:.1f} ⚠️ Marginal — try to widen target or tighten stop.")
-            else:
-                st.error(f"R:R = 1:{rr_ratio:.1f} ❌ Poor trade setup — skip this trade.")
+                st.error("Enter both Bot Token and Chat ID first.")
 
     st.divider()
-    st.markdown("### Quick Reference — Golden Rules")
-    gr1, gr2, gr3, gr4 = st.columns(4)
-    with gr1:
-        st.info("**2% Rule**\nNever risk more than 2% of your capital on a single trade.")
-    with gr2:
-        st.info("**1:2 Minimum R:R**\nOnly enter if potential profit is at least 2× your risk.")
-    with gr3:
-        st.info("**Trail Your Stop**\nOnce up 1× ATR, move stop to break-even. Protect your capital.")
-    with gr4:
-        st.info("**Book 50% at T1**\nTake half the position off at Target 1. Let the rest run to T2.")
+    st.markdown("### Manual Alert — Send current screener results")
+
+    alert_min_score = st.slider("Minimum score to alert", 50, 90, 65, key="alert_score")
+
+    if st.button("📢 Send Alerts Now"):
+        if not tg_token or not tg_chat_id:
+            st.error("Configure Telegram credentials above first.")
+        elif st.session_state.screener_df.empty:
+            st.warning("No screener results. Run the Screener tab first.")
+        else:
+            top = st.session_state.screener_df.head(20).to_dict("records")
+            sent, errs = send_bulk_alerts(tg_token, tg_chat_id, top, min_score=alert_min_score)
+            if sent:
+                st.success(f"✅ Sent {sent} alert(s) to Telegram!")
+            if errs:
+                for e in errs:
+                    st.warning(f"⚠️ {e}")
+            if sent == 0 and not errs:
+                st.info(f"No stocks scored ≥ {alert_min_score}. Lower the minimum or run screener first.")
+
+    st.divider()
+    st.markdown("### When alerts are sent automatically")
+    st.info(
+        "Alerts are sent automatically every time you click **Run Screener** "
+        "in the Screener tab, for all stocks with score ≥ 65 and signal = BUY/STRONG BUY."
+    )
+
+    st.markdown("### Alert message preview")
+    st.code("""
+🟢 NSE Buy Signal — RELIANCE
+
+Signal: STRONG BUY  |  Score: 82/100
+Sector: Energy
+
+Price:  ₹2,845.00
+RSI:    54.3
+ADX:    31.2
+Vol Ratio: 1.8x
+
+1M Return: +4.2%  |  3M: +11.8%
+
+Strategies triggered:
+✅ Golden Cross
+✅ MACD Momentum
+❌ Volume Breakout
+❌ Oversold Bounce
+
+Entry: ₹2,845 | Stop: ₹2,738
+Not financial advice. DYOR.
+    """, language="text")

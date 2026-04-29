@@ -15,10 +15,9 @@ from typing import Optional
 
 import pandas as pd
 
-from data_fetcher import fetch_ohlcv, get_52_week_stats
+from data_fetcher import fetch_ohlcv, fetch_multiple, get_52_week_stats, get_market_cap_tier
 from analyzer import analyze
 from stocks_universe import get_sector, get_display_name
-from data_fetcher import get_market_cap_tier
 
 logger = logging.getLogger(__name__)
 
@@ -75,21 +74,67 @@ def run_screener(
     progress_callback=None,
 ) -> pd.DataFrame:
     """
-    Screen all symbols in parallel.
-    progress_callback(done, total) is called after each stock finishes.
+    Screen all symbols.
+    Phase 1: Batch-fetch all OHLCV data (far fewer Yahoo Finance requests).
+    Phase 2: Analyze each stock in parallel threads (CPU-bound, no network).
+    progress_callback(done, total) is called as each stock finishes analysis.
     Returns a DataFrame sorted by composite score (descending).
     """
-    results = []
     total = len(symbols)
+
+    # Phase 1 — batch download (1–2 Yahoo Finance requests instead of 120+)
+    if progress_callback:
+        progress_callback(0, total)
+    price_data = fetch_multiple(symbols, period="1y", interval="1d")
+    if progress_callback:
+        progress_callback(min(total // 3, total), total)
+
+    # Phase 2 — parallel analysis (pure computation, no network)
+    results = []
     done = 0
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_map = {executor.submit(screen_stock, sym): sym for sym in symbols}
+    def _analyse(sym: str):
+        df = price_data.get(sym)
+        if df is None:
+            return None
+        try:
+            result = analyze(df)
+            stats = get_52_week_stats(df)
+            return {
+                "symbol": sym,
+                "name": get_display_name(sym),
+                "sector": get_sector(sym),
+                "cap_tier": get_market_cap_tier(sym),
+                **result,
+                **stats,
+                "strategy_golden_cross": (
+                    result["golden_cross"]
+                    and result["price_above_ema200"]
+                    and result["macd_bullish"]
+                    and result["adx"] > 20
+                ),
+                "strategy_macd_momentum": (
+                    result["macd_crossover"]
+                    and 40 <= result["rsi"] <= 68
+                    and not result["rsi_overbought"]
+                ),
+                "strategy_breakout": result["breakout"],
+                "strategy_oversold_bounce": (
+                    result["rsi_oversold"]
+                    and result["macd_bullish"]
+                    and result["vol_ratio"] > 1.0
+                ),
+            }
+        except Exception as exc:
+            logger.error("Analysis failed for %s: %s", sym, exc)
+            return None
 
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_map = {executor.submit(_analyse, sym): sym for sym in symbols}
         for future in as_completed(future_map):
             done += 1
             if progress_callback:
-                progress_callback(done, total)
+                progress_callback(min(total // 3 + int(done * 2 / 3), total), total)
             result = future.result()
             if result is not None:
                 results.append(result)
