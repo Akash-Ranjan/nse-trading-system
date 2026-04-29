@@ -21,7 +21,11 @@ from screener import run_screener, filter_by_strategy, get_top_buys, get_sector_
 from risk_manager import calculate_trade_setup, quick_position_size, portfolio_health_check
 from backtest import backtest_all_strategies, compute_equity_curve, compute_max_drawdown
 from portfolio_store import load_portfolio, save_portfolio, add_position, remove_position
-from alerts import send_bulk_alerts, send_test_message
+from alerts import send_bulk_alerts, send_test_message, send_price_alerts
+from watchlist_store import (load_watchlist, save_watchlist, add_to_watchlist,
+                              remove_from_watchlist, update_alert_levels, check_price_alerts)
+from journal_store import (load_journal, add_trade, delete_trade,
+                            get_journal_stats, to_dataframe)
 
 # ── Page Config ───────────────────────────────────────────────────────────────
 
@@ -75,13 +79,15 @@ with st.sidebar:
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "🏠 Dashboard",
     "🔍 Screener",
     "📊 Stock Analysis",
     "🕯️ Intraday",
     "🔬 Backtest",
     "💼 Portfolio",
+    "⭐ Watchlist",
+    "📓 Trade Journal",
     "🔔 Alerts",
 ])
 
@@ -852,3 +858,360 @@ Strategies triggered:
 Entry: ₹2,845 | Stop: ₹2,738
 Not financial advice. DYOR.
     """, language="text")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 8 — WATCHLIST
+# ═══════════════════════════════════════════════════════════════════════════════
+
+with tab8:
+    st.markdown("## Watchlist")
+    st.caption(
+        "Pin your favourite stocks. Set price alerts — get a Telegram notification "
+        "the moment price crosses your level."
+    )
+
+    # Init session state
+    if "watchlist" not in st.session_state:
+        st.session_state.watchlist = load_watchlist()
+
+    # ── Add stock ──
+    with st.expander("➕ Add Stock to Watchlist", expanded=len(st.session_state.watchlist) == 0):
+        wa1, wa2, wa3, wa4 = st.columns(4)
+        wl_sym = wa1.text_input("Symbol", placeholder="e.g. INFY", key="wl_add_sym").strip().upper()
+        wl_above = wa2.number_input("Alert if price goes ABOVE (₹)", min_value=0.0,
+                                     value=0.0, key="wl_above",
+                                     help="Leave 0 to skip this alert")
+        wl_below = wa3.number_input("Alert if price goes BELOW (₹)", min_value=0.0,
+                                     value=0.0, key="wl_below",
+                                     help="Leave 0 to skip this alert")
+        wl_notes = wa4.text_input("Notes", placeholder="Why you're watching this", key="wl_notes")
+
+        if st.button("Add to Watchlist", key="wl_add_btn"):
+            if wl_sym:
+                st.session_state.watchlist = add_to_watchlist(
+                    st.session_state.watchlist,
+                    wl_sym,
+                    alert_above=wl_above if wl_above > 0 else None,
+                    alert_below=wl_below if wl_below > 0 else None,
+                    notes=wl_notes,
+                )
+                st.success(f"Added {wl_sym} to watchlist!")
+                st.rerun()
+            else:
+                st.error("Enter a symbol.")
+
+    if st.session_state.watchlist:
+        # ── Refresh signals ──
+        refresh_btn = st.button("🔄 Refresh All Signals", type="primary", key="wl_refresh")
+
+        if refresh_btn or "wl_data" not in st.session_state:
+            symbols = [e["symbol"] for e in st.session_state.watchlist]
+            with st.spinner("Fetching live data for watchlist..."):
+                wl_results = []
+                price_map = {}
+                for sym in symbols:
+                    df_wl = fetch_ohlcv(sym, period="3mo", force_refresh=refresh_btn)
+                    if df_wl is not None:
+                        res = analyze(df_wl)
+                        price_map[sym] = res["price"]
+                        entry = next((e for e in st.session_state.watchlist if e["symbol"] == sym), {})
+                        wl_results.append({
+                            "Symbol": entry.get("name", sym.replace(".NS", "")),
+                            "Price (₹)": res["price"],
+                            "Signal": res["signal"],
+                            "Score": res["score"],
+                            "RSI": res["rsi"],
+                            "ADX": res["adx"],
+                            "1M %": f"{res['ret_1m']:+.1f}%",
+                            "3M %": f"{res['ret_3m']:+.1f}%",
+                            "Vol Ratio": res["vol_ratio"],
+                            "Alert Above": entry.get("alert_above", "—") or "—",
+                            "Alert Below": entry.get("alert_below", "—") or "—",
+                            "Notes": entry.get("notes", ""),
+                        })
+
+            st.session_state.wl_data = wl_results
+
+            # ── Check price alerts ──
+            triggered = check_price_alerts(st.session_state.watchlist, price_map)
+            if triggered:
+                tg_tok = st.session_state.get("tg_token")
+                tg_cid = st.session_state.get("tg_chat_id")
+                for alert in triggered:
+                    direction = "above" if alert["alert_type"] == "ABOVE" else "below"
+                    st.warning(
+                        f"🔔 **Price Alert:** {alert['name']} is now ₹{alert['price']:,.2f} "
+                        f"({direction} your ₹{alert['level']:,.2f} level)"
+                    )
+                if tg_tok and tg_cid:
+                    sent, _ = send_price_alerts(tg_tok, tg_cid, triggered)
+                    if sent:
+                        st.success(f"📲 Sent {sent} price alert(s) to Telegram!")
+
+        # ── Display table ──
+        if st.session_state.get("wl_data"):
+            wl_df = pd.DataFrame(st.session_state.wl_data)
+
+            def wl_signal_color(val):
+                colors = {
+                    "STRONG BUY": "background-color:#c8e6c9;color:#1b5e20;font-weight:bold",
+                    "BUY": "background-color:#dcedc8;color:#33691e",
+                    "WATCH": "background-color:#fff9c4;color:#f57f17",
+                    "NEUTRAL": "background-color:#f5f5f5;color:#616161",
+                    "AVOID": "background-color:#ffcdd2;color:#b71c1c",
+                }
+                return colors.get(val, "")
+
+            st.dataframe(
+                wl_df.style.map(wl_signal_color, subset=["Signal"]),
+                use_container_width=True,
+                height=max(200, len(wl_df) * 38 + 40),
+            )
+
+        st.divider()
+
+        # ── Edit alert levels ──
+        st.markdown("### Edit Alert Levels")
+        edit_sym = st.selectbox(
+            "Select stock to edit",
+            ["— select —"] + [e["name"] for e in st.session_state.watchlist],
+            key="wl_edit_select"
+        )
+
+        if edit_sym != "— select —":
+            entry = next((e for e in st.session_state.watchlist if e["name"] == edit_sym), None)
+            if entry:
+                ea1, ea2, ea3 = st.columns(3)
+                new_above = ea1.number_input(
+                    "Alert Above (₹)", value=entry.get("alert_above") or 0.0, key="wl_edit_above")
+                new_below = ea2.number_input(
+                    "Alert Below (₹)", value=entry.get("alert_below") or 0.0, key="wl_edit_below")
+                new_notes = ea3.text_input("Notes", value=entry.get("notes", ""), key="wl_edit_notes")
+
+                ec1, ec2 = st.columns(2)
+                if ec1.button("Update Alerts", key="wl_update_btn"):
+                    st.session_state.watchlist = update_alert_levels(
+                        st.session_state.watchlist,
+                        edit_sym,
+                        new_above if new_above > 0 else None,
+                        new_below if new_below > 0 else None,
+                        new_notes,
+                    )
+                    st.session_state.pop("wl_data", None)
+                    st.success(f"Updated alerts for {edit_sym}!")
+                    st.rerun()
+
+                if ec2.button("Remove from Watchlist", type="secondary", key="wl_remove_btn"):
+                    st.session_state.watchlist = remove_from_watchlist(
+                        st.session_state.watchlist, edit_sym)
+                    st.session_state.pop("wl_data", None)
+                    st.rerun()
+
+    else:
+        st.info("Your watchlist is empty. Add stocks above to start tracking them.")
+
+    st.divider()
+    st.info(
+        "**How price alerts work:**\n"
+        "- Set an ABOVE level (e.g. ₹3,100) to be alerted when the stock breaks out\n"
+        "- Set a BELOW level (e.g. ₹2,500) to be alerted on a major dip / stop hit\n"
+        "- Alerts fire once per session — click Refresh to re-arm them after they trigger\n"
+        "- Telegram must be configured in the Alerts tab to receive notifications"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 9 — TRADE JOURNAL
+# ═══════════════════════════════════════════════════════════════════════════════
+
+with tab9:
+    st.markdown("## Trade Journal")
+    st.caption("Log every trade. Track your win rate, mistakes, and learnings over time.")
+
+    if "journal" not in st.session_state:
+        st.session_state.journal = load_journal()
+
+    # ── Log new trade ──
+    with st.expander("📝 Log a New Trade", expanded=len(st.session_state.journal) == 0):
+        jc1, jc2, jc3 = st.columns(3)
+        j_sym = jc1.text_input("Symbol", placeholder="e.g. TCS", key="j_sym").strip().upper()
+        j_dir = jc2.selectbox("Direction", ["BUY", "SHORT"], key="j_dir")
+        j_strat = jc3.selectbox("Strategy Used", [
+            "Golden Cross Trend", "MACD Momentum", "Volume Breakout",
+            "Oversold Bounce", "Manual / Other"], key="j_strat")
+
+        jd1, jd2, jd3, jd4, jd5 = st.columns(5)
+        j_entry = jd1.number_input("Entry (₹)", min_value=0.01, value=100.0, key="j_entry")
+        j_exit = jd2.number_input("Exit (₹)", min_value=0.01, value=110.0, key="j_exit")
+        j_sl = jd3.number_input("Stop-Loss (₹)", min_value=0.01, value=92.0, key="j_sl")
+        j_t1 = jd4.number_input("Target 1 (₹)", min_value=0.01, value=116.0, key="j_t1")
+        j_qty = jd5.number_input("Quantity", min_value=1, value=100, key="j_qty")
+
+        jdate1, jdate2 = st.columns(2)
+        j_date_in = jdate1.text_input("Date Entered (YYYY-MM-DD)", value=str(__import__("datetime").date.today()), key="j_date_in")
+        j_date_out = jdate2.text_input("Date Exited (YYYY-MM-DD)", value=str(__import__("datetime").date.today()), key="j_date_out")
+
+        j_exit_reason = st.selectbox("Exit Reason", [
+            "Hit Target 1", "Hit Target 2", "Hit Stop-Loss", "Trailing Stop",
+            "Manual Exit — Market Weakness", "Manual Exit — Better Opportunity", "Other"
+        ], key="j_exit_reason")
+
+        j_mistakes = st.text_area("Mistakes Made (be honest)", placeholder="e.g. Entered too early, didn't wait for volume confirmation", key="j_mistakes", height=80)
+        j_learnings = st.text_area("Learnings / What to do next time", placeholder="e.g. Wait for RSI to confirm above 50 before entering", key="j_learnings", height=80)
+
+        if st.button("Log Trade", type="primary", key="j_log_btn"):
+            if j_sym and j_entry > 0 and j_exit > 0:
+                pnl_preview = (j_exit - j_entry) * j_qty if j_dir == "BUY" else (j_entry - j_exit) * j_qty
+                outcome = "WIN" if pnl_preview > 0 else ("LOSS" if pnl_preview < 0 else "BREAKEVEN")
+                st.session_state.journal = add_trade(
+                    st.session_state.journal,
+                    symbol=j_sym, direction=j_dir,
+                    entry_price=j_entry, exit_price=j_exit,
+                    stop_loss=j_sl, target_1=j_t1, quantity=int(j_qty),
+                    date_entered=j_date_in, date_exited=j_date_out,
+                    strategy=j_strat, exit_reason=j_exit_reason,
+                    mistakes=j_mistakes, learnings=j_learnings,
+                )
+                icon = "✅" if outcome == "WIN" else "❌"
+                st.success(f"{icon} Trade logged! P&L: ₹{pnl_preview:+,.2f}")
+                st.rerun()
+            else:
+                st.error("Fill in all required fields.")
+
+    # ── Statistics ──
+    if st.session_state.journal:
+        stats = get_journal_stats(st.session_state.journal)
+
+        st.markdown("### Your Trading Statistics")
+        s1, s2, s3, s4, s5 = st.columns(5)
+        s1.metric("Total Trades", stats["total_trades"])
+        s2.metric("Win Rate", f"{stats['win_rate']}%",
+                  delta="Good" if stats["win_rate"] > 50 else "Needs work")
+        s3.metric("Total P&L", f"₹{stats['total_pnl']:+,.2f}",
+                  delta_color="normal" if stats["total_pnl"] > 0 else "inverse")
+        s4.metric("Profit Factor", stats["profit_factor"],
+                  delta="Profitable" if stats["profit_factor"] > 1 else "Losing")
+        s5.metric("Expectancy / Trade", f"₹{stats['expectancy']:+,.2f}")
+
+        st.divider()
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Avg Win", f"{stats['avg_win_pct']:+.2f}%")
+        m2.metric("Avg Loss", f"{stats['avg_loss_pct']:+.2f}%")
+        m3.metric("Best Trade", f"₹{stats['best_trade']:+,.2f}")
+        m4.metric("Worst Trade", f"₹{stats['worst_trade']:+,.2f}")
+
+        # Win/Loss pie
+        pie1, pie2 = st.columns(2)
+        with pie1:
+            fig_wl = px.pie(
+                values=[stats["wins"], stats["losses"],
+                        stats["total_trades"] - stats["wins"] - stats["losses"]],
+                names=["Wins", "Losses", "Breakeven"],
+                title="Win / Loss Ratio",
+                color_discrete_map={"Wins": "#26a69a", "Losses": "#ef5350", "Breakeven": "#bdbdbd"},
+                hole=0.4,
+            )
+            fig_wl.update_layout(height=280)
+            st.plotly_chart(fig_wl, use_container_width=True)
+
+        # Strategy P&L bar chart
+        with pie2:
+            if stats.get("strategy_pnl"):
+                sp = stats["strategy_pnl"]
+                fig_sp = px.bar(
+                    x=list(sp.keys()), y=list(sp.values()),
+                    title="P&L by Strategy (₹)",
+                    color=list(sp.values()),
+                    color_continuous_scale="RdYlGn",
+                )
+                fig_sp.update_layout(height=280, coloraxis_showscale=False)
+                st.plotly_chart(fig_sp, use_container_width=True)
+
+        # Cumulative P&L line
+        journal_sorted = sorted(st.session_state.journal, key=lambda x: x["date_exited"])
+        cum_pnl = []
+        running = 0
+        dates_j = []
+        for t in journal_sorted:
+            running += t["pnl"]
+            cum_pnl.append(round(running, 2))
+            dates_j.append(t["date_exited"])
+
+        fig_cum = go.Figure()
+        fig_cum.add_trace(go.Scatter(
+            x=dates_j, y=cum_pnl,
+            mode="lines+markers",
+            line=dict(color="#1f77b4", width=2),
+            fill="tozeroy",
+            fillcolor="rgba(31,119,180,0.08)",
+            name="Cumulative P&L"
+        ))
+        fig_cum.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+        fig_cum.update_layout(
+            title="Cumulative P&L Over Time",
+            yaxis_title="P&L (₹)", height=280,
+            plot_bgcolor="white",
+        )
+        st.plotly_chart(fig_cum, use_container_width=True)
+
+        st.divider()
+
+        # ── Trade log table ──
+        st.markdown("### Trade Log")
+        journal_df = to_dataframe(st.session_state.journal)
+
+        def pnl_color_j(val):
+            if isinstance(val, (int, float)):
+                if val > 0: return "color:#26a69a;font-weight:bold"
+                elif val < 0: return "color:#ef5350;font-weight:bold"
+            return ""
+
+        def outcome_color(val):
+            colors = {
+                "WIN": "background-color:#c8e6c9;color:#1b5e20;font-weight:bold",
+                "LOSS": "background-color:#ffcdd2;color:#b71c1c;font-weight:bold",
+                "BREAKEVEN": "background-color:#f5f5f5;color:#616161",
+            }
+            return colors.get(val, "")
+
+        st.dataframe(
+            journal_df.style
+                .map(pnl_color_j, subset=["pnl", "pnl_pct"])
+                .map(outcome_color, subset=["outcome"]),
+            use_container_width=True,
+            height=350,
+        )
+
+        # ── Learnings feed ──
+        st.divider()
+        st.markdown("### Mistakes & Learnings Feed")
+        st.caption("Your personal trading knowledge base — built from every trade.")
+
+        for trade in reversed(journal_sorted):
+            if trade.get("mistakes") or trade.get("learnings"):
+                outcome_icon = "✅" if trade["outcome"] == "WIN" else "❌"
+                with st.expander(
+                    f"{outcome_icon} {trade['symbol']} · {trade['date_exited']} · "
+                    f"₹{trade['pnl']:+,.2f} ({trade['pnl_pct']:+.1f}%)"
+                ):
+                    if trade.get("mistakes"):
+                        st.markdown(f"**Mistakes:** {trade['mistakes']}")
+                    if trade.get("learnings"):
+                        st.markdown(f"**Learnings:** {trade['learnings']}")
+                    st.caption(f"Strategy: {trade.get('strategy', 'N/A')} · Exit: {trade.get('exit_reason', 'N/A')}")
+
+        # ── Delete trade ──
+        st.divider()
+        del_options = [f"{t['symbol']} ({t['date_entered']}) — ₹{t['pnl']:+,.0f}"
+                       for t in st.session_state.journal]
+        del_select = st.selectbox("Delete a trade", ["— select —"] + del_options, key="j_del")
+        if st.button("Delete Trade", type="secondary", key="j_del_btn") and del_select != "— select —":
+            idx = del_options.index(del_select)
+            trade_id = st.session_state.journal[idx]["id"]
+            st.session_state.journal = delete_trade(st.session_state.journal, trade_id)
+            st.rerun()
+
+    else:
+        st.info("No trades logged yet. Log your first trade above — including the ones that lost money. That's where the real learning is.")

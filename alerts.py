@@ -94,5 +94,35 @@ def send_test_message(bot_token: str, chat_id: str) -> tuple[bool, str]:
     return send_telegram_message(
         bot_token, chat_id,
         "✅ <b>NSE Trading System</b>\n\nBot connected successfully! "
-        "You'll receive buy signal alerts here after each screener run."
+        "You'll receive buy signal alerts and price alerts here."
     )
+
+
+def format_price_alert(alert: dict) -> str:
+    """Format a watchlist price alert as a Telegram HTML message."""
+    direction = "above" if alert["alert_type"] == "ABOVE" else "below"
+    icon = "🚀" if alert["alert_type"] == "ABOVE" else "🔻"
+    return (
+        f"{icon} <b>Price Alert — {alert['name']}</b>\n\n"
+        f"{alert['name']} has moved <b>{direction} ₹{alert['level']:,.2f}</b>\n"
+        f"Current Price: <b>₹{alert['price']:,.2f}</b>\n\n"
+        f"<i>Check the NSE Trading System for entry signals.</i>"
+    )
+
+
+def send_price_alerts(
+    bot_token: str,
+    chat_id: str,
+    triggered_alerts: list[dict],
+) -> tuple[int, list[str]]:
+    """Send all triggered price level alerts."""
+    sent = 0
+    errors = []
+    for alert in triggered_alerts:
+        msg = format_price_alert(alert)
+        ok, err = send_telegram_message(bot_token, chat_id, msg)
+        if ok:
+            sent += 1
+        else:
+            errors.append(f"{alert['name']}: {err}")
+    return sent, errors
