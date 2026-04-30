@@ -53,7 +53,7 @@ def calculate_trade_setup(
     risk_per_share = atr * atr_stop_multiplier
     stop_loss = round(entry_price - risk_per_share, 2)
 
-    # Ensure stop-loss is not below zero
+    # Floor: stop-loss can never be more than 20% below entry (prevents absurdly wide stops)
     stop_loss = max(stop_loss, entry_price * 0.80)
     risk_per_share = entry_price - stop_loss
 

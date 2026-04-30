@@ -18,19 +18,24 @@ from analyzer import (
 # ── Strategy signal functions (operate on slices ending at day i) ────────────
 
 def _signal_golden_cross(df: pd.DataFrame) -> pd.Series:
+    """
+    Entry condition: stock is already in a golden cross trend (EMA50 > EMA200)
+    AND price is above EMA200 (matches screener) AND a fresh MACD histogram
+    bullish crossover happens today (that's the actual entry trigger).
+    ADX > 20 confirms the trend is real.
+    """
     close = df["Close"]
     ema50 = compute_ema(close, 50)
     ema200 = compute_ema(close, 200)
-    ema20 = compute_ema(close, 20)
-    macd_line, signal_line, _ = compute_macd(close)
+    macd_line, signal_line, hist = compute_macd(close)
     adx = compute_adx(df["High"], df["Low"], close)
 
     buy = (
-        (ema50 > ema200)
-        & (close > ema20)
-        & (macd_line > signal_line)
-        & (adx > 20)
-        & (ema50.shift(1) <= ema200.shift(1))  # fresh crossover
+        (ema50 > ema200)                          # golden cross established
+        & (close > ema200)                        # price above EMA200 (matches screener)
+        & (hist > 0) & (hist.shift(1) <= 0)       # fresh MACD histogram crossover — entry trigger
+        & (macd_line > signal_line)               # MACD bullish
+        & (adx > 20)                              # trend has strength
     )
     return buy
 
@@ -62,14 +67,19 @@ def _signal_volume_breakout(df: pd.DataFrame) -> pd.Series:
 
 
 def _signal_oversold_bounce(df: pd.DataFrame) -> pd.Series:
+    """
+    Entry: RSI < 35 (oversold, matches analyzer) AND MACD line has crossed
+    above signal line (macd_bullish matches screener) AND histogram is rising
+    (momentum confirmation).
+    """
     close = df["Close"]
     rsi = compute_rsi(close)
     macd_line, signal_line, hist = compute_macd(close)
 
     buy = (
-        (rsi < 38)
-        & (hist > hist.shift(1))  # MACD hist rising
-        & (macd_line > macd_line.shift(2))  # MACD line turning up
+        (rsi < 35)                           # matches analyzer rsi_oversold threshold
+        & (macd_line > signal_line)          # macd_bullish — matches screener condition
+        & (hist > hist.shift(1))             # histogram rising for momentum confirmation
     )
     return buy
 

@@ -173,7 +173,6 @@ def analyze(df: pd.DataFrame) -> dict:
     macd_crossover = macd_hist_val > 0 and macd_hist_prev <= 0  # fresh crossover
     macd_momentum = macd_hist_val > macd_hist_prev  # histogram expanding
 
-    rsi_healthy = 40 <= rsi_val <= 65
     rsi_oversold = rsi_val < 35
     rsi_overbought = rsi_val > 75
 

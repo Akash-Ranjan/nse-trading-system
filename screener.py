@@ -5,7 +5,7 @@ Strategies:
   1. Golden Cross Trend  — EMA50 > EMA200, price above EMA20, MACD bullish
   2. MACD Momentum       — Fresh MACD bullish crossover with RSI in healthy zone
   3. Volume Breakout     — Price > 20-day high with vol > 1.4x average
-  4. Oversold Bounce     — RSI < 38 with MACD turning bullish
+  4. Oversold Bounce     — RSI < 35 with MACD turning bullish
   5. Composite Top Picks — Highest composite score across all signals
 """
 
@@ -59,7 +59,7 @@ def screen_stock(symbol: str) -> Optional[dict]:
             "strategy_oversold_bounce": (
                 result["rsi_oversold"]
                 and result["macd_bullish"]
-                and result["vol_ratio"] > 1.0
+                and result["vol_ratio"] > 1.2
             ),
         }
     except Exception as exc:
@@ -122,7 +122,7 @@ def run_screener(
                 "strategy_oversold_bounce": (
                     result["rsi_oversold"]
                     and result["macd_bullish"]
-                    and result["vol_ratio"] > 1.0
+                    and result["vol_ratio"] > 1.2
                 ),
             }
         except Exception as exc:
