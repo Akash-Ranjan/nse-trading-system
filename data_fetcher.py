@@ -210,7 +210,24 @@ def fetch_multiple(
 
 
 def get_current_price(symbol: str) -> Optional[float]:
-    df = fetch_ohlcv(symbol, period="5d")
+    """
+    Fetch latest market price directly from Yahoo Finance meta field.
+    Uses regularMarketPrice so it works regardless of candle count.
+    Falls back to last close from a 1-month OHLCV fetch if meta is unavailable.
+    """
+    url = f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}"
+    try:
+        r = _SESSION.get(url, params={"interval": "1d", "range": "5d"}, timeout=10)
+        if r.status_code == 200:
+            result = r.json().get("chart", {}).get("result")
+            if result:
+                price = result[0].get("meta", {}).get("regularMarketPrice")
+                if price:
+                    return float(price)
+    except Exception:
+        pass
+    # Fallback: 1-month OHLCV (always >=20 candles)
+    df = fetch_ohlcv(symbol, period="1mo")
     return float(df["Close"].iloc[-1]) if df is not None and not df.empty else None
 
 

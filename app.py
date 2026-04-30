@@ -15,7 +15,7 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 
 from stocks_universe import ALL_STOCKS, NIFTY_50, NIFTY_NEXT_50, HIGH_MOMENTUM_MIDCAP, get_display_name
-from data_fetcher import fetch_ohlcv, get_52_week_stats, get_ticker_info, clear_cache
+from data_fetcher import fetch_ohlcv, get_52_week_stats, get_ticker_info, clear_cache, get_current_price
 from analyzer import analyze
 from screener import run_screener, filter_by_strategy, get_top_buys, get_sector_breakdown, get_summary_stats
 from risk_manager import calculate_trade_setup, quick_position_size, portfolio_health_check
@@ -696,9 +696,9 @@ with tab6:
             if p_symbol and p_entry > p_sl:
                 current_price = p_entry
                 try:
-                    df_tmp = fetch_ohlcv(f"{p_symbol.upper()}.NS", period="5d")
-                    if df_tmp is not None:
-                        current_price = float(df_tmp["Close"].iloc[-1])
+                    fetched = get_current_price(f"{p_symbol.upper()}.NS")
+                    if fetched:
+                        current_price = fetched
                 except Exception:
                     pass
 
@@ -721,9 +721,9 @@ with tab6:
                 for pos in st.session_state.portfolio:
                     sym = pos["symbol"] if pos["symbol"].endswith(".NS") else f"{pos['symbol']}.NS"
                     try:
-                        df_tmp = fetch_ohlcv(sym, period="5d", force_refresh=True)
-                        if df_tmp is not None and not df_tmp.empty:
-                            pos["current"] = round(float(df_tmp["Close"].iloc[-1]), 2)
+                        price = get_current_price(sym)
+                        if price:
+                            pos["current"] = round(price, 2)
                     except Exception:
                         pass
             from portfolio_store import save_portfolio
