@@ -2,11 +2,11 @@
 Stock screener — runs multiple strategies across the universe and ranks results.
 
 Strategies:
-  1. Golden Cross Trend  — EMA50 > EMA200, price above EMA20, MACD bullish
+  1. Golden Cross Trend  — EMA50 > EMA200, price above EMA200, MACD bullish
   2. MACD Momentum       — Fresh MACD bullish crossover with RSI in healthy zone
   3. Volume Breakout     — Price > 20-day high with vol > 1.4x average
   4. Oversold Bounce     — RSI < 35 with MACD turning bullish
-  5. Composite Top Picks — Highest composite score across all signals
+  5. BB Squeeze Breakout — Bollinger Band squeeze resolving upward with volume
 """
 
 import logging
@@ -60,6 +60,15 @@ def screen_stock(symbol: str) -> Optional[dict]:
                 result["rsi_oversold"]
                 and result["macd_bullish"]
                 and result["vol_ratio"] > 1.2
+            ),
+            # BB Squeeze: bands were tight (consolidation), now price breaks above
+            # EMA20 with MACD bullish and above-average volume. The squeeze itself
+            # is already computed in the analyzer as bb_squeeze.
+            "strategy_bb_squeeze": (
+                result["bb_squeeze"]
+                and result["price_above_ema200"]
+                and result["macd_bullish"]
+                and result["vol_ratio"] > 1.1
             ),
         }
     except Exception as exc:
@@ -124,6 +133,12 @@ def run_screener(
                     and result["macd_bullish"]
                     and result["vol_ratio"] > 1.2
                 ),
+                "strategy_bb_squeeze": (
+                    result["bb_squeeze"]
+                    and result["price_above_ema200"]
+                    and result["macd_bullish"]
+                    and result["vol_ratio"] > 1.1
+                ),
             }
         except Exception as exc:
             logger.error("Analysis failed for %s: %s", sym, exc)
@@ -156,6 +171,7 @@ def filter_by_strategy(df: pd.DataFrame, strategy: str) -> pd.DataFrame:
         "MACD Momentum": "strategy_macd_momentum",
         "Volume Breakout": "strategy_breakout",
         "Oversold Bounce": "strategy_oversold_bounce",
+        "BB Squeeze Breakout": "strategy_bb_squeeze",
     }.get(strategy)
 
     if strategy_col and strategy_col in df.columns:
@@ -190,4 +206,5 @@ def get_summary_stats(df: pd.DataFrame) -> dict:
         "breakout_count": int(df.get("strategy_breakout", pd.Series(False)).sum()),
         "macd_momentum_count": int(df.get("strategy_macd_momentum", pd.Series(False)).sum()),
         "oversold_bounce_count": int(df.get("strategy_oversold_bounce", pd.Series(False)).sum()),
+        "bb_squeeze_count": int(df.get("strategy_bb_squeeze", pd.Series(False)).sum()),
     }

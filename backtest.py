@@ -11,7 +11,7 @@ import pandas as pd
 
 from analyzer import (
     compute_rsi, compute_macd, compute_ema, compute_atr,
-    compute_adx, compute_volume_ma,
+    compute_adx, compute_volume_ma, compute_bollinger_bands,
 )
 
 
@@ -84,11 +84,39 @@ def _signal_oversold_bounce(df: pd.DataFrame) -> pd.Series:
     return buy
 
 
+def _signal_bb_squeeze(df: pd.DataFrame) -> pd.Series:
+    """
+    Entry: Bollinger Bands were in a squeeze (width < 6% of midband) on the
+    previous bar — consolidation phase. Today price is above EMA20, MACD is
+    bullish, and volume is above average — squeeze resolving upward.
+    """
+    close = df["Close"]
+    volume = df["Volume"]
+    bb_upper, bb_mid, bb_lower = compute_bollinger_bands(close)
+    bb_width = (bb_upper - bb_lower) / bb_mid.replace(0, float("nan"))
+    ema20 = compute_ema(close, 20)
+    ema200 = compute_ema(close, 200)
+    macd_line, signal_line, _ = compute_macd(close)
+    vol_ma = compute_volume_ma(volume, 20)
+
+    squeeze_yesterday = bb_width.shift(1) < 0.06
+
+    buy = (
+        squeeze_yesterday                       # was squeezing (consolidation)
+        & (close > ema20)                       # price breaking above short-term EMA
+        & (close > ema200)                      # above long-term trend
+        & (macd_line > signal_line)             # MACD bullish
+        & (volume > vol_ma * 1.1)              # above-average volume (breakout confirmation)
+    )
+    return buy
+
+
 STRATEGIES = {
     "Golden Cross Trend": _signal_golden_cross,
     "MACD Momentum": _signal_macd_momentum,
     "Volume Breakout": _signal_volume_breakout,
     "Oversold Bounce": _signal_oversold_bounce,
+    "BB Squeeze Breakout": _signal_bb_squeeze,
 }
 
 

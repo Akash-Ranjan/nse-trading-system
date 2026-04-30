@@ -16,7 +16,7 @@ from plotly.subplots import make_subplots
 
 from stocks_universe import ALL_STOCKS, NIFTY_50, NIFTY_NEXT_50, HIGH_MOMENTUM_MIDCAP, get_display_name
 from data_fetcher import fetch_ohlcv, get_52_week_stats, get_ticker_info, clear_cache, get_current_price
-from analyzer import analyze
+from analyzer import analyze, compute_vwap
 from screener import run_screener, filter_by_strategy, get_top_buys, get_sector_breakdown, get_summary_stats
 from risk_manager import calculate_trade_setup, quick_position_size, portfolio_health_check
 from backtest import backtest_all_strategies, compute_equity_curve, compute_max_drawdown
@@ -99,8 +99,8 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
 with tab1:
     st.markdown('<div class="main-header">NSE Trading System v2</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="sub-header">4 strategies · Backtest · Intraday charts · '
-        'Telegram alerts · Persistent portfolio</div>', unsafe_allow_html=True)
+        '<div class="sub-header">5 strategies · Market Regime Filter · VWAP Intraday · '
+        'Backtest · Telegram alerts · Persistent portfolio</div>', unsafe_allow_html=True)
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Capital", f"₹{capital:,.0f}")
@@ -141,15 +141,17 @@ with tab1:
 
     st.divider()
     st.markdown("### Strategies at a Glance")
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        st.markdown("**Golden Cross**\nEMA50 > EMA200 + price > EMA20 + MACD bullish.\n*Hold: 4–12 weeks*")
+        st.markdown("**Golden Cross**\nEMA50 > EMA200 + price > EMA200 + MACD bullish.\n*Hold: 4–12 weeks*")
     with c2:
         st.markdown("**MACD Momentum**\nFresh MACD crossover + RSI 40–68.\n*Hold: 2–6 weeks*")
     with c3:
         st.markdown("**Volume Breakout**\nPrice > 20D high + volume > 1.4× avg.\n*Hold: 1–4 weeks*")
     with c4:
-        st.markdown("**Oversold Bounce**\nRSI < 38 + MACD turning up.\n*Hold: 1–3 weeks*")
+        st.markdown("**Oversold Bounce**\nRSI < 35 + MACD bullish + vol > 1.2×.\n*Hold: 1–3 weeks*")
+    with c5:
+        st.markdown("**BB Squeeze**\nBands contract → breakout with volume + above EMA200.\n*Hold: 1–4 weeks*")
 
     st.divider()
     r1, r2, r3 = st.columns(3)
@@ -173,7 +175,7 @@ with tab2:
     with col_a:
         strategy_filter = st.selectbox("Filter by Strategy", [
             "All Strategies", "Golden Cross Trend", "MACD Momentum",
-            "Volume Breakout", "Oversold Bounce"])
+            "Volume Breakout", "Oversold Bounce", "BB Squeeze Breakout"])
     with col_b:
         sector_options = ["All Sectors", "Banking", "IT", "FMCG", "Pharma", "Auto",
                           "Energy", "Metals", "Infra", "NBFC", "Insurance", "Cement", "Consumer"]
@@ -194,6 +196,50 @@ with tab2:
     with info_col:
         st.info("If scan returns 0 stocks: Yahoo Finance may be rate-limiting. "
                 "Wait 5 minutes, click **Clear Cache**, then run again.")
+
+    # ── Market Regime Filter ──────────────────────────────────────────────────
+    # Check Nifty 50 vs EMA200 before scanning. Buying against a falling market
+    # dramatically lowers win rates across all strategies.
+    try:
+        _nifty_regime = fetch_ohlcv("^NSEI", period="1y")
+        if _nifty_regime is not None and len(_nifty_regime) >= 200:
+            from analyzer import compute_ema as _ema
+            _nifty_ema200 = float(_ema(_nifty_regime["Close"], 200).iloc[-1])
+            _nifty_close  = float(_nifty_regime["Close"].iloc[-1])
+            _nifty_ema50  = float(_ema(_nifty_regime["Close"], 50).iloc[-1])
+            _above_ema200 = _nifty_close > _nifty_ema200
+            _above_ema50  = _nifty_close > _nifty_ema50
+            _regime_label = (
+                "🟢 Bullish" if _above_ema200 and _above_ema50 else
+                "🟡 Caution" if _above_ema200 else
+                "🔴 Bearish"
+            )
+            with st.expander(f"📊 Market Regime: NIFTY 50 is **{_regime_label}**", expanded=not _above_ema200):
+                rc1, rc2, rc3 = st.columns(3)
+                rc1.metric("NIFTY 50", f"{_nifty_close:,.0f}")
+                rc2.metric("EMA 200", f"{_nifty_ema200:,.0f}",
+                           delta=f"{(_nifty_close/_nifty_ema200-1)*100:+.1f}% vs EMA200")
+                rc3.metric("EMA 50",  f"{_nifty_ema50:,.0f}",
+                           delta=f"{(_nifty_close/_nifty_ema50-1)*100:+.1f}% vs EMA50")
+                if not _above_ema200:
+                    st.error(
+                        "⛔ **Bearish market regime — NIFTY is below its 200-day EMA.**\n\n"
+                        "All long strategies have significantly lower win rates in a falling market. "
+                        "Only trade Oversold Bounce setups with tight stops, or stay in cash."
+                    )
+                elif not _above_ema50:
+                    st.warning(
+                        "⚠️ **Caution — NIFTY is below its 50-day EMA.**\n\n"
+                        "Momentum is weakening. Prefer Golden Cross stocks above their EMA200, "
+                        "use smaller position sizes, and be quick to take profits."
+                    )
+                else:
+                    st.success(
+                        "✅ **Healthy bull market — NIFTY is above both EMA50 and EMA200.**\n\n"
+                        "All 5 strategies have high-quality conditions. Full position sizing appropriate."
+                    )
+    except Exception:
+        pass
 
     if "screener_df" not in st.session_state:
         st.session_state.screener_df = pd.DataFrame()
@@ -246,6 +292,7 @@ with tab2:
             "MACD Momentum": summary.get("macd_momentum_count", 0),
             "Breakout": summary.get("breakout_count", 0),
             "Oversold Bounce": summary.get("oversold_bounce_count", 0),
+            "BB Squeeze": summary.get("bb_squeeze_count", 0),
         }
         fig_strat = px.bar(x=list(strat_data.keys()), y=list(strat_data.values()),
                            title="Stocks Triggering Each Strategy",
@@ -508,13 +555,29 @@ with tab4:
         df_intra = st.session_state[intra_key]
         result_intra = analyze(df_intra)
 
-        i1, i2, i3, i4 = st.columns(4)
-        i1.metric("Current Price", f"₹{result_intra['price']:,.2f}")
+        # Compute VWAP (daily-anchored, meaningful for intraday timeframes)
+        vwap_series = compute_vwap(df_intra["High"], df_intra["Low"],
+                                   df_intra["Close"], df_intra["Volume"])
+        vwap_tail = vwap_series.tail(120)
+        vwap_price = float(vwap_series.iloc[-1]) if not vwap_series.empty else None
+
+        # VWAP signal: price above/below VWAP
+        intra_price = result_intra["price"]
+        vwap_signal = (
+            "Above VWAP — Bullish bias" if vwap_price and intra_price > vwap_price
+            else "Below VWAP — Bearish bias" if vwap_price else "N/A"
+        )
+
+        i1, i2, i3, i4, i5 = st.columns(5)
+        i1.metric("Current Price", f"₹{intra_price:,.2f}")
         i2.metric("RSI", result_intra["rsi"],
                   delta="Overbought" if result_intra["rsi_overbought"] else
                   ("Oversold" if result_intra["rsi_oversold"] else None))
         i3.metric("Signal", result_intra["signal"])
         i4.metric("Score", f"{result_intra['score']}/100")
+        i5.metric("VWAP", f"₹{vwap_price:,.2f}" if vwap_price else "N/A",
+                  delta=vwap_signal,
+                  delta_color="normal" if vwap_price and intra_price > vwap_price else "inverse")
 
         st.divider()
 
@@ -522,11 +585,11 @@ with tab4:
         fig_i = make_subplots(rows=3, cols=1, shared_xaxes=True,
                               row_heights=[0.55, 0.25, 0.20],
                               vertical_spacing=0.03,
-                              subplot_titles=["Price + EMA 20/50", "RSI", "Volume"])
+                              subplot_titles=["Price + EMA 20/50 + VWAP", "RSI", "Volume"])
 
-        dates_i = [str(d) for d in df_intra.index]
         tail_df = df_intra.tail(120)
         tail_dates = [str(d) for d in tail_df.index]
+        vwap_tail_dates = [str(d) for d in vwap_tail.index]
 
         fig_i.add_trace(go.Candlestick(
             x=tail_dates,
@@ -542,6 +605,11 @@ with tab4:
                                     line=dict(color="#1f77b4", width=1.2)), row=1, col=1)
         fig_i.add_trace(go.Scatter(x=dates_tail_60, y=ema50_i, name="EMA 50",
                                     line=dict(color="#ff7f0e", width=1.2)), row=1, col=1)
+        # VWAP — the most important intraday reference line
+        fig_i.add_trace(go.Scatter(
+            x=vwap_tail_dates, y=vwap_tail.tolist(),
+            name="VWAP", line=dict(color="#e91e63", width=1.8, dash="dot"),
+        ), row=1, col=1)
 
         fig_i.add_trace(go.Scatter(x=dates_tail_60, y=result_intra["rsi_series"],
                                     line=dict(color="#9c27b0", width=1.5), name="RSI"), row=2, col=1)
@@ -555,7 +623,7 @@ with tab4:
         fig_i.add_trace(go.Scatter(x=dates_tail_60, y=vol_ma_s, name="Vol MA",
                                     line=dict(color="#1565c0", width=1.5, dash="dash")), row=3, col=1)
 
-        fig_i.update_layout(height=680, xaxis_rangeslider_visible=False,
+        fig_i.update_layout(height=700, xaxis_rangeslider_visible=False,
                             plot_bgcolor="white", paper_bgcolor="white")
         st.plotly_chart(fig_i, use_container_width=True)
 

@@ -111,6 +111,33 @@ def compute_volume_ma(volume: pd.Series, period: int = 20) -> pd.Series:
     return volume.rolling(window=period).mean()
 
 
+def compute_vwap(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    volume: pd.Series,
+) -> pd.Series:
+    """
+    Compute daily-anchored VWAP.
+    Resets at the start of each calendar day so it is meaningful for intraday
+    timeframes (1h, 30m, 15m). For daily data it degenerates to a cumulative
+    average and is not meaningful — only call on intraday DataFrames.
+    """
+    typical_price = (high + low + close) / 3
+    tp_vol = typical_price * volume
+
+    dates = close.index.normalize()
+    result = pd.Series(index=close.index, dtype=float)
+
+    for day in dates.unique():
+        mask = dates == day
+        cum_tp_vol = tp_vol[mask].cumsum()
+        cum_vol = volume[mask].cumsum()
+        result[mask] = cum_tp_vol / cum_vol.replace(0, float("nan"))
+
+    return result
+
+
 # ── Full Analysis Bundle ──────────────────────────────────────────────────────
 
 def analyze(df: pd.DataFrame) -> dict:
