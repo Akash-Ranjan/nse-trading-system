@@ -17,6 +17,7 @@ Each watchlist entry:
 import json
 from datetime import date
 from pathlib import Path
+from typing import Optional
 
 WATCHLIST_FILE = Path(__file__).parent / "watchlist.json"
 
@@ -43,8 +44,8 @@ def save_watchlist(entries: list[dict]) -> None:
 def add_to_watchlist(
     entries: list[dict],
     symbol: str,
-    alert_above: float | None = None,
-    alert_below: float | None = None,
+    alert_above: Optional[float] = None,
+    alert_below: Optional[float] = None,
     notes: str = "",
 ) -> list[dict]:
     name = symbol.replace(".NS", "")
@@ -78,8 +79,8 @@ def remove_from_watchlist(entries: list[dict], symbol: str) -> list[dict]:
 def update_alert_levels(
     entries: list[dict],
     symbol: str,
-    alert_above: float | None,
-    alert_below: float | None,
+    alert_above: Optional[float],
+    alert_below: Optional[float],
     notes: str = "",
 ) -> list[dict]:
     full_sym = symbol if symbol.endswith(".NS") else f"{symbol}.NS"
