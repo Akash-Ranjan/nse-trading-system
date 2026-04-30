@@ -326,7 +326,7 @@ with tab2:
                 with _TPE(max_workers=8) as _ex:
                     _ev_futs  = {_ex.submit(get_event_risk,   s): s for s in buy_syms}
                     _del_futs = {_ex.submit(get_delivery_pct, s): s for s in buy_syms}
-                    for _f in _asc(dict(**_ev_futs, **_del_futs)):
+                    for _f in _asc({**_ev_futs, **_del_futs}):
                         if _f in _ev_futs:
                             ev_map[_ev_futs[_f]]   = _f.result()
                         else:
