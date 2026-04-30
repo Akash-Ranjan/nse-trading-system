@@ -254,114 +254,198 @@ def get_ticker_info(symbol: str) -> dict:
         return {}
 
 
+def _fetch_news_headlines(symbol: str, count: int = 8) -> list[str]:
+    """
+    Fetch recent news headlines for a symbol from Yahoo Finance search API.
+    Returns a list of lowercase headline strings (empty list on failure).
+    """
+    try:
+        url = "https://query2.finance.yahoo.com/v1/finance/search"
+        params = {"q": symbol, "newsCount": count, "quotesCount": 0}
+        r = _SESSION.get(url, params=params, timeout=10)
+        if r.status_code == 200:
+            items = r.json().get("news", [])
+            return [item.get("title", "").lower() for item in items if item.get("title")]
+    except Exception:
+        pass
+    return []
+
+
+# Keyword groups for news-based risk scoring.
+# Each entry: (penalty, label, list-of-trigger-words)
+_NEWS_RISK_RULES: list[tuple[int, str, list[str]]] = [
+    # ── Catastrophic events ──────────────────────────────────────────────────
+    (30, "🚨 Fraud/Legal",      ["fraud", "scam", "embezzlement", "money laundering",
+                                  "cbi raid", "ed raid", "enforcement directorate",
+                                  "sebi ban", "nse ban", "bse ban", "delisting",
+                                  "securities fraud", "insider trading", "ponzi"]),
+    (30, "🚨 Insolvency",       ["bankruptcy", "insolvency", "nclt", "liquidation",
+                                  "default", "npa", "debt restructuring", "moratorium"]),
+    # ── Senior management departure ─────────────────────────────────────────
+    (25, "⚠️ CEO/MD Exit",      ["ceo resign", "ceo quit", "ceo steps down", "ceo fired",
+                                  "md resign", "md quit", "managing director resign",
+                                  "cfo resign", "cfo quit", "cfo steps down",
+                                  "chairman resign", "promoter resign",
+                                  "key executive", "top executive resign"]),
+    # ── Regulatory & legal ───────────────────────────────────────────────────
+    (20, "⚠️ Regulatory",       ["sebi notice", "sebi order", "sebi investigation",
+                                  "rbi penalty", "rbi action", "income tax raid",
+                                  "it raid", "customs raid", "gst evasion",
+                                  "show cause notice", "adjudication order",
+                                  "market regulator", "penalty imposed"]),
+    (20, "⚠️ Whistleblower",    ["whistleblower", "whistle blower", "audit concern",
+                                  "accounting irregularity", "financial irregularity",
+                                  "restatement", "auditor resign", "auditor quit"]),
+    # ── Promoter / ownership risk ────────────────────────────────────────────
+    (15, "📉 Promoter Risk",    ["promoter pledge", "promoter sell", "promoter stake",
+                                  "promoter offload", "bulk deal sell", "block deal sell",
+                                  "fii selling", "institutional selling"]),
+    # ── Analyst downgrades ───────────────────────────────────────────────────
+    (10, "📊 Downgrade",        ["downgrade", "target cut", "sell rating", "underperform",
+                                  "underweight", "reduce rating", "rating downgrade"]),
+    # ── Positive news (score boost) ──────────────────────────────────────────
+    (-5, "✅ Buyback/M&A",      ["buyback", "share repurchase", "merger", "acquisition",
+                                  "takeover bid", "open offer", "strategic stake"]),
+]
+
+
 def get_event_risk(symbol: str) -> dict:
     """
-    Fetch upcoming corporate events that can blow up a trade:
-      - Earnings date (gaps ±10% on results day)
-      - Ex-dividend date (price drops by dividend amount)
-      - Beta (high beta = wider stop needed, smaller position)
+    Checks three risk categories for a symbol:
+      1. Scheduled corporate events  — earnings, ex-dividend, beta
+      2. News-based risks            — CEO resignation, fraud, regulatory, downgrade
+      3. Positive news               — buyback, M&A (reduces penalty)
 
     Returns a dict with:
-      earnings_date      : str | None  — next earnings date (YYYY-MM-DD)
-      earnings_days_away : int | None  — days until earnings
-      ex_div_date        : str | None  — ex-dividend date
+      earnings_date      : str | None
+      earnings_days_away : int | None
+      ex_div_date        : str | None
       ex_div_days_away   : int | None
       dividend_amount    : float | None
       beta               : float | None
-      score_penalty      : int         — points to subtract from score (0–30)
-      warnings           : list[str]   — human-readable risk warnings
+      news_headlines     : list[str]   — raw headlines fetched (for display)
+      news_flags         : list[str]   — triggered labels e.g. '⚠️ CEO/MD Exit'
+      score_penalty      : int         — net points to subtract (capped at 30)
+      warnings           : list[str]   — human-readable risk messages
     """
     import datetime as _dt
-    result = {
+    result: dict = {
         "earnings_date": None,
         "earnings_days_away": None,
         "ex_div_date": None,
         "ex_div_days_away": None,
         "dividend_amount": None,
         "beta": None,
+        "news_headlines": [],
+        "news_flags": [],
         "score_penalty": 0,
         "warnings": [],
     }
 
+    # ── 1. Structured corporate events (earnings / ex-div / beta) ─────────────
     try:
         url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
         params = {"modules": "calendarEvents,summaryDetail"}
         r = _SESSION.get(url, params=params, timeout=15)
-        if r.status_code != 200:
-            return result
+        if r.status_code == 200:
+            j = r.json()
+            summary = j.get("quoteSummary", {}).get("result", [{}])[0]
+            cal = summary.get("calendarEvents", {})
+            sd  = summary.get("summaryDetail", {})
+            today = _dt.date.today()
 
-        j = r.json()
-        summary = j.get("quoteSummary", {}).get("result", [{}])[0]
-        cal = summary.get("calendarEvents", {})
-        sd  = summary.get("summaryDetail", {})
-        today = _dt.date.today()
+            # Earnings date
+            earnings_dates = cal.get("earnings", {}).get("earningsDate", [])
+            if earnings_dates:
+                raw_ts = earnings_dates[0].get("raw")
+                if raw_ts:
+                    edate = _dt.date.fromtimestamp(raw_ts)
+                    days_away = (edate - today).days
+                    if days_away >= 0:
+                        result["earnings_date"] = str(edate)
+                        result["earnings_days_away"] = days_away
+                        if days_away <= 3:
+                            result["score_penalty"] += 30
+                            result["warnings"].append(
+                                f"🚨 Earnings in {days_away} day(s) ({edate}) — VERY HIGH RISK. "
+                                "Stock can gap ±10%. Avoid new entries."
+                            )
+                        elif days_away <= 7:
+                            result["score_penalty"] += 20
+                            result["warnings"].append(
+                                f"⚠️ Earnings in {days_away} days ({edate}) — HIGH RISK. "
+                                "Consider waiting until after results."
+                            )
+                        elif days_away <= 14:
+                            result["score_penalty"] += 10
+                            result["warnings"].append(
+                                f"📅 Earnings in {days_away} days ({edate}). "
+                                "Use tighter stop-loss or smaller position."
+                            )
 
-        # ── Earnings date ─────────────────────────────────────────────────────
-        earnings_dates = cal.get("earnings", {}).get("earningsDate", [])
-        if earnings_dates:
-            raw_ts = earnings_dates[0].get("raw")
-            if raw_ts:
-                edate = _dt.date.fromtimestamp(raw_ts)
-                days_away = (edate - today).days
-                if days_away >= 0:
-                    result["earnings_date"] = str(edate)
-                    result["earnings_days_away"] = days_away
-                    if days_away <= 3:
-                        result["score_penalty"] += 30
-                        result["warnings"].append(
-                            f"🚨 Earnings in {days_away} day(s) ({edate}) — VERY HIGH RISK. "
-                            "Stock can gap ±10%. Avoid new entries."
-                        )
-                    elif days_away <= 7:
-                        result["score_penalty"] += 20
-                        result["warnings"].append(
-                            f"⚠️ Earnings in {days_away} days ({edate}) — HIGH RISK. "
-                            "Consider waiting until after results."
-                        )
-                    elif days_away <= 14:
-                        result["score_penalty"] += 10
-                        result["warnings"].append(
-                            f"📅 Earnings in {days_away} days ({edate}). "
-                            "Use tighter stop-loss or smaller position."
-                        )
+            # Ex-dividend date
+            ex_div_ts = sd.get("exDividendDate", {}).get("raw")
+            div_rate  = sd.get("dividendRate", {}).get("raw")
+            if ex_div_ts:
+                ex_date = _dt.date.fromtimestamp(ex_div_ts)
+                days_away = (ex_date - today).days
+                if 0 <= days_away <= 7:
+                    result["ex_div_date"] = str(ex_date)
+                    result["ex_div_days_away"] = days_away
+                    result["dividend_amount"] = div_rate
+                    result["score_penalty"] += 10
+                    div_str = f" (₹{div_rate:.2f} will be deducted from price)" if div_rate else ""
+                    result["warnings"].append(
+                        f"💰 Ex-dividend in {days_away} day(s) ({ex_date}){div_str}. "
+                        "Price drops by dividend on ex-date."
+                    )
 
-        # ── Ex-dividend date ──────────────────────────────────────────────────
-        ex_div_ts = sd.get("exDividendDate", {}).get("raw")
-        div_rate  = sd.get("dividendRate", {}).get("raw")
-        if ex_div_ts:
-            ex_date = _dt.date.fromtimestamp(ex_div_ts)
-            days_away = (ex_date - today).days
-            if 0 <= days_away <= 7:
-                result["ex_div_date"] = str(ex_date)
-                result["ex_div_days_away"] = days_away
-                result["dividend_amount"] = div_rate
-                result["score_penalty"] += 10
-                div_str = f" (₹{div_rate:.2f} will be deducted from price)" if div_rate else ""
-                result["warnings"].append(
-                    f"💰 Ex-dividend date in {days_away} day(s) ({ex_date}){div_str}. "
-                    "Price drops by dividend on ex-date."
-                )
-
-        # ── Beta ─────────────────────────────────────────────────────────────
-        beta = sd.get("beta", {}).get("raw")
-        if beta:
-            result["beta"] = round(beta, 2)
-            if beta > 2.0:
-                result["score_penalty"] += 5
-                result["warnings"].append(
-                    f"⚡ High Beta ({beta:.1f}) — stock is {beta:.1f}× more volatile than NIFTY. "
-                    "Use 50% of normal position size."
-                )
-            elif beta > 1.5:
-                result["warnings"].append(
-                    f"📊 Beta {beta:.1f} — moderately volatile. "
-                    "Consider 75% of normal position size."
-                )
+            # Beta
+            beta = sd.get("beta", {}).get("raw")
+            if beta:
+                result["beta"] = round(beta, 2)
+                if beta > 2.0:
+                    result["score_penalty"] += 5
+                    result["warnings"].append(
+                        f"⚡ High Beta ({beta:.1f}) — {beta:.1f}× more volatile than NIFTY. "
+                        "Use 50% of normal position size."
+                    )
+                elif beta > 1.5:
+                    result["warnings"].append(
+                        f"📊 Beta {beta:.1f} — moderately volatile. "
+                        "Consider 75% of normal position size."
+                    )
 
     except Exception as exc:
-        logger.debug("Event risk fetch failed for %s: %s", symbol, exc)
+        logger.debug("Structured event fetch failed for %s: %s", symbol, exc)
 
-    result["score_penalty"] = min(result["score_penalty"], 30)
+    # ── 2. News-based risk scan ───────────────────────────────────────────────
+    headlines = _fetch_news_headlines(symbol)
+    result["news_headlines"] = headlines
+
+    if headlines:
+        combined = " | ".join(headlines)
+        news_penalty = 0
+        for penalty, label, keywords in _NEWS_RISK_RULES:
+            if any(kw in combined for kw in keywords):
+                result["news_flags"].append(label)
+                # Positive rules use negative penalty (boost), others add penalty
+                news_penalty += penalty
+                # Build a warning with the matching headline as evidence
+                matching = next(
+                    (h for h in headlines if any(kw in h for kw in keywords)), None
+                )
+                if penalty > 0:
+                    result["warnings"].append(
+                        f"{label} detected in recent news"
+                        + (f': "{matching.title()}"' if matching else ".")
+                    )
+
+        # Cap news penalty at 30; allow positive news to reduce by up to 5
+        news_penalty = max(-5, min(news_penalty, 30))
+        result["score_penalty"] += news_penalty
+
+    result["score_penalty"] = max(0, min(result["score_penalty"], 30))
     return result
 
 

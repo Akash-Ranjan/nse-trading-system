@@ -272,18 +272,31 @@ with tab2:
                     if row["signal"] not in ("BUY", "STRONG BUY"):
                         return ""
                     ev = ev_map.get(row["symbol"], {})
-                    warns = ev.get("warnings", [])
                     days_e = ev.get("earnings_days_away")
                     days_d = ev.get("ex_div_days_away")
+                    flags  = ev.get("news_flags", [])
+                    # Highest-priority label wins
+                    if any("Fraud" in f or "Insolvency" in f for f in flags):
+                        return "🚨 News: " + next(
+                            f for f in flags if "Fraud" in f or "Insolvency" in f)
                     if days_e is not None and days_e <= 3:
                         return f"🚨 Earnings {days_e}d"
+                    if any("CEO" in f or "Regulatory" in f or "Whistleblower" in f
+                           for f in flags):
+                        first = next(f for f in flags if any(
+                            k in f for k in ("CEO", "Regulatory", "Whistleblower")))
+                        return f"⚠️ News: {first.split()[-1]}"
                     if days_e is not None and days_e <= 7:
                         return f"⚠️ Earnings {days_e}d"
+                    if any("Downgrade" in f or "Promoter" in f for f in flags):
+                        return "📉 News flag"
                     if days_d is not None:
                         return f"💰 Ex-Div {days_d}d"
                     if days_e is not None and days_e <= 14:
                         return f"📅 Earnings {days_e}d"
-                    return "✅ Clear" if not warns else "ℹ️ Review"
+                    if any("Buyback" in f or "M&A" in f for f in flags):
+                        return "✅ +ve News"
+                    return "✅ Clear" if not ev.get("warnings") else "ℹ️ Review"
 
                 df_all["event_risk"] = df_all.apply(_ev_label, axis=1)
             else:
@@ -553,22 +566,45 @@ with tab3:
         penalty = ev_risk.get("score_penalty", 0)
         adjusted_score = max(0, result["score"] - penalty)
         warnings = ev_risk.get("warnings", [])
+        news_flags = ev_risk.get("news_flags", [])
+        headlines = ev_risk.get("news_headlines", [])
+
+        st.markdown("### Event & News Risk")
 
         if warnings:
-            st.markdown("### Event Risk Alerts")
             for w in warnings:
-                st.warning(w)
+                if w.startswith("🚨"):
+                    st.error(w)
+                elif w.startswith(("⚠️", "📉", "📊 Down")):
+                    st.warning(w)
+                elif w.startswith("✅"):
+                    st.success(w)
+                else:
+                    st.info(w)
+
             if penalty > 0:
                 ec1, ec2 = st.columns(2)
                 ec1.metric("Raw Score", result["score"])
                 ec2.metric(
-                    "Adjusted Score (after event risk)",
+                    "Adjusted Score (after event/news risk)",
                     adjusted_score,
                     delta=f"-{penalty} pts",
                     delta_color="inverse",
                 )
         else:
-            st.success("No upcoming earnings, dividends, or high-beta warnings.")
+            st.success("✅ No earnings, dividends, high-beta, or news risk detected. Signal is clean.")
+
+        # News flags summary badges
+        if news_flags:
+            st.markdown("**News flags detected:** " + "  ".join(
+                f"`{f}`" for f in news_flags
+            ))
+
+        # Show recent headlines in an expander
+        if headlines:
+            with st.expander(f"📰 Recent News Headlines ({len(headlines)} fetched)", expanded=False):
+                for h in headlines:
+                    st.markdown(f"- {h.title()}")
 
         beta_val = ev_risk.get("beta")
         if beta_val:
