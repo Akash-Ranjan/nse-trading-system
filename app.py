@@ -15,7 +15,10 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 
 from stocks_universe import ALL_STOCKS, NIFTY_50, NIFTY_NEXT_50, HIGH_MOMENTUM_MIDCAP, get_display_name
-from data_fetcher import fetch_ohlcv, get_52_week_stats, get_ticker_info, clear_cache, get_current_price, get_event_risk
+from data_fetcher import (fetch_ohlcv, get_52_week_stats, get_ticker_info, clear_cache,
+                          get_current_price, get_event_risk,
+                          get_india_vix, get_vix_signal, get_fo_expiry_info,
+                          get_delivery_pct, get_delivery_label)
 from analyzer import analyze, compute_vwap
 from screener import run_screener, filter_by_strategy, get_top_buys, get_sector_breakdown, get_summary_stats
 from risk_manager import calculate_trade_setup, quick_position_size, portfolio_health_check
@@ -198,10 +201,11 @@ with tab2:
                 "Wait 5 minutes, click **Clear Cache**, then run again.")
 
     # ── Market Regime Filter ──────────────────────────────────────────────────
-    # Check Nifty 50 vs EMA200 before scanning. Buying against a falling market
-    # dramatically lowers win rates across all strategies.
     try:
         _nifty_regime = fetch_ohlcv("^NSEI", period="1y")
+        _vix_val      = get_india_vix()
+        _expiry_info  = get_fo_expiry_info()
+
         if _nifty_regime is not None and len(_nifty_regime) >= 200:
             from analyzer import compute_ema as _ema
             _nifty_ema200 = float(_ema(_nifty_regime["Close"], 200).iloc[-1])
@@ -214,29 +218,84 @@ with tab2:
                 "🟡 Caution" if _above_ema200 else
                 "🔴 Bearish"
             )
-            with st.expander(f"📊 Market Regime: NIFTY 50 is **{_regime_label}**", expanded=not _above_ema200):
-                rc1, rc2, rc3 = st.columns(3)
+
+            _vix_label, _ = get_vix_signal(_vix_val) if _vix_val else ("N/A", "")
+            _expiry_warn  = (_expiry_info.get("is_expiry_week") and
+                             "⚠️ Expiry" or "")
+
+            expander_title = (
+                f"📊 Market: NIFTY {_regime_label}"
+                + (f"  |  VIX {_vix_val} {_vix_label}" if _vix_val else "")
+                + (f"  |  {_expiry_warn}" if _expiry_warn else "")
+            )
+            _danger = not _above_ema200 or (_vix_val and _vix_val > 20)
+            with st.expander(expander_title, expanded=bool(_danger)):
+                # Row 1 — Nifty metrics
+                rc1, rc2, rc3, rc4, rc5 = st.columns(5)
                 rc1.metric("NIFTY 50", f"{_nifty_close:,.0f}")
-                rc2.metric("EMA 200", f"{_nifty_ema200:,.0f}",
-                           delta=f"{(_nifty_close/_nifty_ema200-1)*100:+.1f}% vs EMA200")
-                rc3.metric("EMA 50",  f"{_nifty_ema50:,.0f}",
-                           delta=f"{(_nifty_close/_nifty_ema50-1)*100:+.1f}% vs EMA50")
+                rc2.metric("EMA 200",  f"{_nifty_ema200:,.0f}",
+                           delta=f"{(_nifty_close/_nifty_ema200-1)*100:+.1f}%")
+                rc3.metric("EMA 50",   f"{_nifty_ema50:,.0f}",
+                           delta=f"{(_nifty_close/_nifty_ema50-1)*100:+.1f}%")
+                if _vix_val:
+                    _vix_lbl, _vix_guide = get_vix_signal(_vix_val)
+                    rc4.metric("India VIX", f"{_vix_val}", delta=_vix_lbl,
+                               delta_color=("inverse" if _vix_val > 17 else "normal"))
+                else:
+                    rc4.metric("India VIX", "N/A")
+
+                # F&O expiry
+                _w_days = _expiry_info["weekly_days_away"]
+                _expiry_str = (
+                    "TODAY" if _w_days == 0 else
+                    f"Tomorrow" if _w_days == 1 else
+                    f"In {_w_days}d"
+                )
+                _monthly_tag = " (Monthly)" if _expiry_info["is_monthly_expiry"] else ""
+                rc5.metric(f"F&O Expiry{_monthly_tag}", _expiry_str,
+                           delta=_expiry_info["next_weekly_expiry"])
+
+                st.divider()
+
+                # Regime text
                 if not _above_ema200:
                     st.error(
-                        "⛔ **Bearish market regime — NIFTY is below its 200-day EMA.**\n\n"
-                        "All long strategies have significantly lower win rates in a falling market. "
-                        "Only trade Oversold Bounce setups with tight stops, or stay in cash."
+                        "⛔ **Bearish regime — NIFTY below EMA200.**  "
+                        "Long strategies have low win rates. Only Oversold Bounce with tight stops, or stay cash."
                     )
                 elif not _above_ema50:
                     st.warning(
-                        "⚠️ **Caution — NIFTY is below its 50-day EMA.**\n\n"
-                        "Momentum is weakening. Prefer Golden Cross stocks above their EMA200, "
-                        "use smaller position sizes, and be quick to take profits."
+                        "⚠️ **Caution — NIFTY below EMA50.**  "
+                        "Momentum weakening. Smaller positions, prefer Golden Cross stocks above EMA200."
                     )
                 else:
                     st.success(
-                        "✅ **Healthy bull market — NIFTY is above both EMA50 and EMA200.**\n\n"
-                        "All 5 strategies have high-quality conditions. Full position sizing appropriate."
+                        "✅ **Bull market — NIFTY above EMA50 & EMA200.**  "
+                        "All 5 strategies active. Full position sizing appropriate."
+                    )
+
+                # VIX guidance
+                if _vix_val:
+                    _vix_lbl, _vix_guide = get_vix_signal(_vix_val)
+                    if _vix_val >= 20:
+                        st.error(f"**India VIX {_vix_val} — {_vix_lbl}:** {_vix_guide}")
+                    elif _vix_val >= 17:
+                        st.warning(f"**India VIX {_vix_val} — {_vix_lbl}:** {_vix_guide}")
+                    else:
+                        st.info(f"**India VIX {_vix_val} — {_vix_lbl}:** {_vix_guide}")
+
+                # F&O expiry guidance
+                if _expiry_info["is_expiry_day"]:
+                    st.error(
+                        "🚨 **F&O Expiry TODAY.**  "
+                        "Intraday strategies unreliable in last 60 mins. "
+                        "Stocks with high OI get pinned or spiked near expiry. Avoid new intraday entries after 2:30 PM."
+                    )
+                elif _expiry_info["is_expiry_week"]:
+                    _tag = "Monthly " if _expiry_info["is_monthly_expiry"] else ""
+                    st.warning(
+                        f"⚠️ **{_tag}F&O Expiry in {_w_days} day(s) ({_expiry_info['next_weekly_expiry']}).**  "
+                        "High OI stocks may get pinned to strike prices. Use tighter intraday stops."
                     )
     except Exception:
         pass
@@ -256,17 +315,22 @@ with tab2:
 
         progress_bar.empty()
 
-        # ── Event risk check for BUY / STRONG BUY picks ───────────────────────
+        # ── Event risk + Delivery % for BUY / STRONG BUY picks ──────────────
         # Fetch in parallel only for actionable signals so it stays fast.
         if not df_all.empty:
             buy_syms = df_all[df_all["signal"].isin(["BUY", "STRONG BUY"])]["symbol"].tolist()
             if buy_syms:
                 from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _asc
-                ev_map: dict = {}
+                ev_map:  dict = {}
+                del_map: dict = {}
                 with _TPE(max_workers=8) as _ex:
-                    _futs = {_ex.submit(get_event_risk, s): s for s in buy_syms}
-                    for _f in _asc(_futs):
-                        ev_map[_futs[_f]] = _f.result()
+                    _ev_futs  = {_ex.submit(get_event_risk,   s): s for s in buy_syms}
+                    _del_futs = {_ex.submit(get_delivery_pct, s): s for s in buy_syms}
+                    for _f in _asc(dict(**_ev_futs, **_del_futs)):
+                        if _f in _ev_futs:
+                            ev_map[_ev_futs[_f]]   = _f.result()
+                        else:
+                            del_map[_del_futs[_f]] = _f.result()
 
                 def _ev_label(row):
                     if row["signal"] not in ("BUY", "STRONG BUY"):
@@ -275,7 +339,6 @@ with tab2:
                     days_e = ev.get("earnings_days_away")
                     days_d = ev.get("ex_div_days_away")
                     flags  = ev.get("news_flags", [])
-                    # Highest-priority label wins
                     if any("Fraud" in f or "Insolvency" in f for f in flags):
                         return "🚨 News: " + next(
                             f for f in flags if "Fraud" in f or "Insolvency" in f)
@@ -298,9 +361,13 @@ with tab2:
                         return "✅ +ve News"
                     return "✅ Clear" if not ev.get("warnings") else "ℹ️ Review"
 
-                df_all["event_risk"] = df_all.apply(_ev_label, axis=1)
+                df_all["event_risk"]  = df_all.apply(_ev_label, axis=1)
+                df_all["delivery_pct"] = df_all["symbol"].map(
+                    lambda s: get_delivery_label(del_map.get(s)) if s in del_map else ""
+                )
             else:
-                df_all["event_risk"] = ""
+                df_all["event_risk"]   = ""
+                df_all["delivery_pct"] = ""
 
         st.session_state.screener_df = df_all
         st.session_state.screener_summary = get_summary_stats(df_all)
@@ -355,12 +422,13 @@ with tab2:
         df_display = df_display[df_display["score"] >= min_score]
 
         cols_show = ["name", "sector", "price", "score", "signal", "event_risk",
-                     "rsi", "adx", "macd_bullish", "golden_cross", "breakout",
-                     "ret_1m", "ret_3m", "vol_ratio"]
+                     "delivery_pct", "rsi", "adx", "macd_bullish", "golden_cross",
+                     "breakout", "ret_1m", "ret_3m", "vol_ratio"]
         cols_available = [c for c in cols_show if c in df_display.columns]
         renamed = {
             "name": "Stock", "sector": "Sector", "price": "Price (₹)",
             "score": "Score", "signal": "Signal", "event_risk": "Event Risk",
+            "delivery_pct": "Delivery %",
             "rsi": "RSI", "adx": "ADX", "macd_bullish": "MACD↑", "golden_cross": "GoldenX",
             "breakout": "Breakout", "ret_1m": "1M %", "ret_3m": "3M %", "vol_ratio": "Vol Ratio",
         }
@@ -398,10 +466,25 @@ with tab2:
                 return "background-color:#e8f5e9;color:#2e7d32"
             return ""
 
+        def delivery_color(val):
+            if not val or val == "N/A":
+                return ""
+            if "💪" in val:
+                return "background-color:#c8e6c9;color:#1b5e20;font-weight:bold"
+            if "✅" in val:
+                return "background-color:#dcedc8;color:#33691e"
+            if "⚠️" in val:
+                return "background-color:#fff9c4;color:#f57f17"
+            if "❌" in val:
+                return "background-color:#ffcdd2;color:#b71c1c"
+            return ""
+
         display_df = df_display[cols_available].rename(columns=renamed)
         style = display_df.style.map(signal_color, subset=["Signal"])
         if "Event Risk" in display_df.columns:
             style = style.map(event_risk_color, subset=["Event Risk"])
+        if "Delivery %" in display_df.columns:
+            style = style.map(delivery_color, subset=["Delivery %"])
         st.dataframe(style, use_container_width=True, height=420)
 
         # Sector pie

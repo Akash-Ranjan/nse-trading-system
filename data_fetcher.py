@@ -473,3 +473,178 @@ def get_market_cap_tier(symbol: str) -> str:
 
 def clear_cache() -> None:
     _cache.clear()
+
+
+# ── India VIX ─────────────────────────────────────────────────────────────────
+
+def get_india_vix() -> Optional[float]:
+    """
+    Fetch the current India VIX from Yahoo Finance (symbol ^INDIAVIX).
+    India VIX measures expected 30-day volatility of Nifty options.
+
+    Interpretation:
+      < 13  : Complacency — market very calm, low fear
+      13–17 : Normal range — healthy market
+      17–20 : Elevated — be cautious, tighten stops
+      > 20  : High fear — avoid new positions, use 50% size
+      > 25  : Extreme fear — stay in cash or hedge only
+    """
+    try:
+        url = "https://query2.finance.yahoo.com/v8/finance/chart/%5EINDIAVIX"
+        r = _SESSION.get(url, params={"interval": "1d", "range": "5d"}, timeout=10)
+        if r.status_code == 200:
+            res = r.json().get("chart", {}).get("result")
+            if res:
+                vix = res[0].get("meta", {}).get("regularMarketPrice")
+                if vix:
+                    return round(float(vix), 2)
+    except Exception as exc:
+        logger.debug("India VIX fetch failed: %s", exc)
+    return None
+
+
+def get_vix_signal(vix: float) -> tuple[str, str]:
+    """
+    Returns (label, guidance) for a given VIX level.
+    """
+    if vix < 13:
+        return "😴 Very Low", "Market complacent. Signals are reliable but watch for sudden reversals."
+    if vix < 17:
+        return "✅ Normal", "Healthy volatility. All strategies can be used with full position size."
+    if vix < 20:
+        return "⚠️ Elevated", "Use 75% position size. Widen stops by 0.5× ATR."
+    if vix < 25:
+        return "🔴 High", "Use 50% position size. Only enter strongest signals (score > 75). Tight stops."
+    return "🚨 Extreme", "Stay in cash or hedge only. Do NOT open new positions."
+
+
+# ── F&O Expiry Awareness ──────────────────────────────────────────────────────
+
+def get_fo_expiry_info() -> dict:
+    """
+    Calculate days to next weekly and monthly NSE F&O expiry.
+
+    NSE F&O expiry schedule:
+      Weekly  — every Thursday (Nifty, BankNifty, FinNifty, MidcapNifty)
+      Monthly — last Thursday of each month (all stock futures)
+
+    Near expiry, F&O stocks exhibit:
+      - Max pain pinning: price is dragged toward the strike with maximum open interest
+      - Short gamma squeezes: sharp spikes and reversals in the last hour
+      - Intraday strategies become unreliable in the last 60 minutes of expiry day
+    """
+    import datetime as _dt
+    today = _dt.date.today()
+
+    # Next weekly expiry (Thursday = weekday 3)
+    days_to_thu = (3 - today.weekday()) % 7
+    next_weekly = today + _dt.timedelta(days=days_to_thu)
+
+    # Last Thursday of current month (monthly expiry)
+    if today.month == 12:
+        first_next = _dt.date(today.year + 1, 1, 1)
+    else:
+        first_next = _dt.date(today.year, today.month + 1, 1)
+    last_day = first_next - _dt.timedelta(days=1)
+    while last_day.weekday() != 3:
+        last_day -= _dt.timedelta(days=1)
+    monthly_expiry = last_day
+
+    weekly_days  = (next_weekly    - today).days
+    monthly_days = (monthly_expiry - today).days
+    is_monthly   = (next_weekly == monthly_expiry)
+
+    return {
+        "next_weekly_expiry":   str(next_weekly),
+        "weekly_days_away":     weekly_days,
+        "next_monthly_expiry":  str(monthly_expiry),
+        "monthly_days_away":    monthly_days,
+        "is_expiry_day":        weekly_days == 0,
+        "is_expiry_week":       weekly_days <= 2,
+        "is_monthly_expiry":    is_monthly,
+        "is_monthly_week":      is_monthly and weekly_days <= 2,
+    }
+
+
+# ── NSE session + Delivery % ──────────────────────────────────────────────────
+
+_NSE_SESSION: dict = {"cookies": None, "fetched_at": 0.0}
+_NSE_COOKIES_TTL = 3600  # refresh NSE cookies every hour
+
+_NSE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.nseindia.com/",
+    "X-Requested-With": "XMLHttpRequest",
+    "Connection": "keep-alive",
+}
+
+
+def _refresh_nse_cookies() -> bool:
+    """Visit NSE homepage to get a valid session cookie. Returns True on success."""
+    try:
+        s = requests.Session()
+        s.verify = False
+        s.headers.update({
+            "User-Agent": _NSE_HEADERS["User-Agent"],
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        })
+        r = s.get("https://www.nseindia.com/", timeout=12)
+        if r.status_code == 200:
+            _NSE_SESSION["cookies"] = dict(r.cookies)
+            _NSE_SESSION["fetched_at"] = time.time()
+            return True
+    except Exception as exc:
+        logger.debug("NSE cookie refresh failed: %s", exc)
+    return False
+
+
+def get_delivery_pct(symbol: str) -> Optional[float]:
+    """
+    Fetch delivery-to-traded volume percentage from NSE for the last trading day.
+
+    High delivery % (> 50%) = institutional/retail conviction — supports the signal.
+    Low delivery  % (< 25%) = mostly intraday/speculative — signal less trustworthy.
+
+    symbol should be the NSE symbol without exchange suffix (e.g. 'RELIANCE', not 'RELIANCE.NS')
+    """
+    # Strip .NS suffix if present
+    nse_sym = symbol.replace(".NS", "").replace(".BO", "").upper()
+
+    # Refresh cookies if stale
+    if not _NSE_SESSION["cookies"] or (time.time() - _NSE_SESSION["fetched_at"]) > _NSE_COOKIES_TTL:
+        if not _refresh_nse_cookies():
+            return None
+
+    try:
+        url = f"https://www.nseindia.com/api/quote-equity?symbol={nse_sym}"
+        r = requests.get(url, headers=_NSE_HEADERS,
+                         cookies=_NSE_SESSION["cookies"], timeout=12, verify=False)
+        if r.status_code == 200:
+            data = r.json()
+            sec = data.get("securityInfo", {})
+            dtt = sec.get("deliveryToTradedQuantity")
+            if dtt is not None:
+                return round(float(dtt), 1)
+    except Exception as exc:
+        logger.debug("Delivery % fetch failed for %s: %s", nse_sym, exc)
+    return None
+
+
+def get_delivery_label(pct: Optional[float]) -> str:
+    """Return a short label + interpretation for a delivery percentage."""
+    if pct is None:
+        return "N/A"
+    if pct >= 60:
+        return f"{pct:.0f}% 💪"
+    if pct >= 45:
+        return f"{pct:.0f}% ✅"
+    if pct >= 25:
+        return f"{pct:.0f}% ⚠️"
+    return f"{pct:.0f}% ❌"
