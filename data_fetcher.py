@@ -568,72 +568,84 @@ def get_fo_expiry_info() -> dict:
 
 # ── NSE session + Delivery % ──────────────────────────────────────────────────
 
-_NSE_SESSION: dict = {"cookies": None, "fetched_at": 0.0}
-_NSE_COOKIES_TTL = 3600  # refresh NSE cookies every hour
+# ── NSE Bhavcopy delivery cache ───────────────────────────────────────────────
+# NSE publishes a full-market CSV (bhavcopy) every trading day at ~6 PM.
+# It contains DELIV_PER (delivery %) for every equity. We download it once
+# per day and cache it in memory — no session/cookie required.
 
-_NSE_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www.nseindia.com/",
-    "X-Requested-With": "XMLHttpRequest",
-    "Connection": "keep-alive",
-}
+_BHAV_CACHE: dict = {"data": None, "date": None}   # {symbol -> delivery_pct}
 
 
-def _refresh_nse_cookies() -> bool:
-    """Visit NSE homepage to get a valid session cookie. Returns True on success."""
-    try:
-        s = requests.Session()
-        s.verify = False
-        s.headers.update({
-            "User-Agent": _NSE_HEADERS["User-Agent"],
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        })
-        r = s.get("https://www.nseindia.com/", timeout=12)
-        if r.status_code == 200:
-            _NSE_SESSION["cookies"] = dict(r.cookies)
-            _NSE_SESSION["fetched_at"] = time.time()
-            return True
-    except Exception as exc:
-        logger.debug("NSE cookie refresh failed: %s", exc)
-    return False
+def _load_bhavcopy(trade_date=None) -> dict:
+    """
+    Download NSE equity bhavcopy for trade_date (defaults to today / last trading day).
+    Returns dict {SYMBOL: delivery_pct_float}. Returns {} on failure.
+
+    URL format:
+      https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_DDMMYYYY.csv
+    Columns include: SYMBOL, SERIES, DELIV_QTY, DELIV_PER
+    Only EQ series rows are used.
+    """
+    import datetime as _dt
+    import io
+
+    if trade_date is None:
+        trade_date = _dt.date.today()
+
+    # Walk back up to 5 days to find the last trading day with a published file
+    for delta in range(6):
+        d = trade_date - _dt.timedelta(days=delta)
+        if d.weekday() >= 5:        # skip Saturday / Sunday
+            continue
+        date_str = d.strftime("%d%m%Y")
+        url = f"https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{date_str}.csv"
+        try:
+            r = _SESSION.get(url, timeout=20)
+            if r.status_code != 200:
+                continue
+            df = pd.read_csv(io.StringIO(r.text))
+            df.columns = [c.strip() for c in df.columns]
+            # Keep EQ series only, drop rows with missing delivery
+            if "SERIES" in df.columns:
+                df = df[df["SERIES"].str.strip() == "EQ"]
+            if "DELIV_PER" not in df.columns or "SYMBOL" not in df.columns:
+                continue
+            df["SYMBOL"] = df["SYMBOL"].str.strip()
+            df["DELIV_PER"] = pd.to_numeric(df["DELIV_PER"], errors="coerce")
+            result = dict(zip(df["SYMBOL"], df["DELIV_PER"]))
+            logger.info("Bhavcopy loaded: %s (%d symbols)", d, len(result))
+            return result
+        except Exception as exc:
+            logger.debug("Bhavcopy fetch failed for %s: %s", date_str, exc)
+
+    return {}
+
+
+def _get_bhavcopy() -> dict:
+    """Return in-memory bhavcopy, refreshing once per calendar day."""
+    import datetime as _dt
+    today = str(_dt.date.today())
+    if _BHAV_CACHE["date"] != today or not _BHAV_CACHE["data"]:
+        _BHAV_CACHE["data"] = _load_bhavcopy()
+        _BHAV_CACHE["date"] = today
+    return _BHAV_CACHE["data"] or {}
 
 
 def get_delivery_pct(symbol: str) -> Optional[float]:
     """
-    Fetch delivery-to-traded volume percentage from NSE for the last trading day.
+    Return delivery-to-traded % for a symbol from NSE bhavcopy (published daily).
 
     High delivery % (> 50%) = institutional/retail conviction — supports the signal.
     Low delivery  % (< 25%) = mostly intraday/speculative — signal less trustworthy.
 
-    symbol should be the NSE symbol without exchange suffix (e.g. 'RELIANCE', not 'RELIANCE.NS')
+    Uses bhavcopy CSV (no session/cookie required) instead of the live NSE API.
+    symbol can be with or without .NS suffix.
     """
-    # Strip .NS suffix if present
     nse_sym = symbol.replace(".NS", "").replace(".BO", "").upper()
-
-    # Refresh cookies if stale
-    if not _NSE_SESSION["cookies"] or (time.time() - _NSE_SESSION["fetched_at"]) > _NSE_COOKIES_TTL:
-        if not _refresh_nse_cookies():
-            return None
-
-    try:
-        url = f"https://www.nseindia.com/api/quote-equity?symbol={nse_sym}"
-        r = requests.get(url, headers=_NSE_HEADERS,
-                         cookies=_NSE_SESSION["cookies"], timeout=12, verify=False)
-        if r.status_code == 200:
-            data = r.json()
-            sec = data.get("securityInfo", {})
-            dtt = sec.get("deliveryToTradedQuantity")
-            if dtt is not None:
-                return round(float(dtt), 1)
-    except Exception as exc:
-        logger.debug("Delivery % fetch failed for %s: %s", nse_sym, exc)
+    bhav = _get_bhavcopy()
+    val  = bhav.get(nse_sym)
+    if val is not None and not pd.isna(val):
+        return round(float(val), 1)
     return None
 
 
