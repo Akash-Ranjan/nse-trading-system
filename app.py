@@ -255,6 +255,40 @@ with tab2:
             df_all = run_screener(selected_universe, progress_callback=update_progress)
 
         progress_bar.empty()
+
+        # ── Event risk check for BUY / STRONG BUY picks ───────────────────────
+        # Fetch in parallel only for actionable signals so it stays fast.
+        if not df_all.empty:
+            buy_syms = df_all[df_all["signal"].isin(["BUY", "STRONG BUY"])]["symbol"].tolist()
+            if buy_syms:
+                from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _asc
+                ev_map: dict = {}
+                with _TPE(max_workers=8) as _ex:
+                    _futs = {_ex.submit(get_event_risk, s): s for s in buy_syms}
+                    for _f in _asc(_futs):
+                        ev_map[_futs[_f]] = _f.result()
+
+                def _ev_label(row):
+                    if row["signal"] not in ("BUY", "STRONG BUY"):
+                        return ""
+                    ev = ev_map.get(row["symbol"], {})
+                    warns = ev.get("warnings", [])
+                    days_e = ev.get("earnings_days_away")
+                    days_d = ev.get("ex_div_days_away")
+                    if days_e is not None and days_e <= 3:
+                        return f"🚨 Earnings {days_e}d"
+                    if days_e is not None and days_e <= 7:
+                        return f"⚠️ Earnings {days_e}d"
+                    if days_d is not None:
+                        return f"💰 Ex-Div {days_d}d"
+                    if days_e is not None and days_e <= 14:
+                        return f"📅 Earnings {days_e}d"
+                    return "✅ Clear" if not warns else "ℹ️ Review"
+
+                df_all["event_risk"] = df_all.apply(_ev_label, axis=1)
+            else:
+                df_all["event_risk"] = ""
+
         st.session_state.screener_df = df_all
         st.session_state.screener_summary = get_summary_stats(df_all)
 
@@ -307,14 +341,14 @@ with tab2:
             df_display = df_display[df_display["sector"] == sector_filter]
         df_display = df_display[df_display["score"] >= min_score]
 
-        cols_show = ["name", "sector", "price", "score", "signal", "rsi", "adx",
-                     "macd_bullish", "golden_cross", "breakout",
+        cols_show = ["name", "sector", "price", "score", "signal", "event_risk",
+                     "rsi", "adx", "macd_bullish", "golden_cross", "breakout",
                      "ret_1m", "ret_3m", "vol_ratio"]
         cols_available = [c for c in cols_show if c in df_display.columns]
         renamed = {
             "name": "Stock", "sector": "Sector", "price": "Price (₹)",
-            "score": "Score", "signal": "Signal", "rsi": "RSI",
-            "adx": "ADX", "macd_bullish": "MACD↑", "golden_cross": "GoldenX",
+            "score": "Score", "signal": "Signal", "event_risk": "Event Risk",
+            "rsi": "RSI", "adx": "ADX", "macd_bullish": "MACD↑", "golden_cross": "GoldenX",
             "breakout": "Breakout", "ret_1m": "1M %", "ret_3m": "3M %", "vol_ratio": "Vol Ratio",
         }
 
@@ -338,9 +372,24 @@ with tab2:
             }
             return colors.get(val, "")
 
+        def event_risk_color(val):
+            if not val:
+                return ""
+            if val.startswith("🚨"):
+                return "background-color:#ffcdd2;color:#b71c1c;font-weight:bold"
+            if val.startswith("⚠️"):
+                return "background-color:#ffe0b2;color:#e65100"
+            if val.startswith("💰") or val.startswith("📅"):
+                return "background-color:#fff9c4;color:#f57f17"
+            if val.startswith("✅"):
+                return "background-color:#e8f5e9;color:#2e7d32"
+            return ""
+
         display_df = df_display[cols_available].rename(columns=renamed)
-        st.dataframe(display_df.style.map(signal_color, subset=["Signal"]),
-                     use_container_width=True, height=420)
+        style = display_df.style.map(signal_color, subset=["Signal"])
+        if "Event Risk" in display_df.columns:
+            style = style.map(event_risk_color, subset=["Event Risk"])
+        st.dataframe(style, use_container_width=True, height=420)
 
         # Sector pie
         buy_stocks = df_display[df_display["signal"].isin(["BUY", "STRONG BUY"])]
