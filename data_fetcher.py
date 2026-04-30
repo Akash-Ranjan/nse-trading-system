@@ -42,7 +42,19 @@ logger = logging.getLogger(__name__)
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
 _cache: dict[str, tuple[pd.DataFrame, float]] = {}
-CACHE_TTL_SECONDS = 1800  # 30 minutes
+
+# Daily candles don't change intraday — cache them for 4 hours.
+# Intraday candles (1h/30m/15m/5m) expire after 15 minutes so stale data
+# never stacks on top of Yahoo's own 15-minute delay.
+_CACHE_TTL: dict[str, int] = {
+    "1d":  4 * 3600,   # daily   → 4 hours
+    "60m":   15 * 60,  # 1-hour  → 15 min
+    "1h":    15 * 60,
+    "30m":   15 * 60,  # 30-min  → 15 min
+    "15m":   10 * 60,  # 15-min  → 10 min
+    "5m":     5 * 60,  # 5-min   → 5 min
+}
+_DEFAULT_CACHE_TTL = 900  # 15 min fallback
 
 _PERIOD_MAP = {
     "1y": "1y", "2y": "2y", "6mo": "6mo", "3mo": "3mo",
@@ -55,8 +67,9 @@ _INTERVAL_MAP = {
 }
 
 
-def _is_stale(fetched_at: float) -> bool:
-    return (time.time() - fetched_at) > CACHE_TTL_SECONDS
+def _is_stale(fetched_at: float, interval: str = "1d") -> bool:
+    ttl = _CACHE_TTL.get(interval, _DEFAULT_CACHE_TTL)
+    return (time.time() - fetched_at) > ttl
 
 
 # ── Direct Yahoo Finance v8 fetch (primary) ───────────────────────────────────
@@ -144,7 +157,7 @@ def fetch_ohlcv(
 
     if not force_refresh and cache_key in _cache:
         df, fetched_at = _cache[cache_key]
-        if not _is_stale(fetched_at):
+        if not _is_stale(fetched_at, interval):
             return df
 
     df = _fetch_direct(symbol, period, interval)
@@ -173,7 +186,7 @@ def fetch_multiple(
 
     for sym in symbols:
         key = f"{sym}_{period}_{interval}"
-        if key in _cache and not _is_stale(_cache[key][1]):
+        if key in _cache and not _is_stale(_cache[key][1], interval):
             results[sym] = _cache[key][0]
         else:
             to_fetch.append(sym)
