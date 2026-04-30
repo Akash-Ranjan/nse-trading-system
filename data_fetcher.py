@@ -254,6 +254,117 @@ def get_ticker_info(symbol: str) -> dict:
         return {}
 
 
+def get_event_risk(symbol: str) -> dict:
+    """
+    Fetch upcoming corporate events that can blow up a trade:
+      - Earnings date (gaps ±10% on results day)
+      - Ex-dividend date (price drops by dividend amount)
+      - Beta (high beta = wider stop needed, smaller position)
+
+    Returns a dict with:
+      earnings_date      : str | None  — next earnings date (YYYY-MM-DD)
+      earnings_days_away : int | None  — days until earnings
+      ex_div_date        : str | None  — ex-dividend date
+      ex_div_days_away   : int | None
+      dividend_amount    : float | None
+      beta               : float | None
+      score_penalty      : int         — points to subtract from score (0–30)
+      warnings           : list[str]   — human-readable risk warnings
+    """
+    import datetime as _dt
+    result = {
+        "earnings_date": None,
+        "earnings_days_away": None,
+        "ex_div_date": None,
+        "ex_div_days_away": None,
+        "dividend_amount": None,
+        "beta": None,
+        "score_penalty": 0,
+        "warnings": [],
+    }
+
+    try:
+        url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
+        params = {"modules": "calendarEvents,summaryDetail"}
+        r = _SESSION.get(url, params=params, timeout=15)
+        if r.status_code != 200:
+            return result
+
+        j = r.json()
+        summary = j.get("quoteSummary", {}).get("result", [{}])[0]
+        cal = summary.get("calendarEvents", {})
+        sd  = summary.get("summaryDetail", {})
+        today = _dt.date.today()
+
+        # ── Earnings date ─────────────────────────────────────────────────────
+        earnings_dates = cal.get("earnings", {}).get("earningsDate", [])
+        if earnings_dates:
+            raw_ts = earnings_dates[0].get("raw")
+            if raw_ts:
+                edate = _dt.date.fromtimestamp(raw_ts)
+                days_away = (edate - today).days
+                if days_away >= 0:
+                    result["earnings_date"] = str(edate)
+                    result["earnings_days_away"] = days_away
+                    if days_away <= 3:
+                        result["score_penalty"] += 30
+                        result["warnings"].append(
+                            f"🚨 Earnings in {days_away} day(s) ({edate}) — VERY HIGH RISK. "
+                            "Stock can gap ±10%. Avoid new entries."
+                        )
+                    elif days_away <= 7:
+                        result["score_penalty"] += 20
+                        result["warnings"].append(
+                            f"⚠️ Earnings in {days_away} days ({edate}) — HIGH RISK. "
+                            "Consider waiting until after results."
+                        )
+                    elif days_away <= 14:
+                        result["score_penalty"] += 10
+                        result["warnings"].append(
+                            f"📅 Earnings in {days_away} days ({edate}). "
+                            "Use tighter stop-loss or smaller position."
+                        )
+
+        # ── Ex-dividend date ──────────────────────────────────────────────────
+        ex_div_ts = sd.get("exDividendDate", {}).get("raw")
+        div_rate  = sd.get("dividendRate", {}).get("raw")
+        if ex_div_ts:
+            ex_date = _dt.date.fromtimestamp(ex_div_ts)
+            days_away = (ex_date - today).days
+            if 0 <= days_away <= 7:
+                result["ex_div_date"] = str(ex_date)
+                result["ex_div_days_away"] = days_away
+                result["dividend_amount"] = div_rate
+                result["score_penalty"] += 10
+                div_str = f" (₹{div_rate:.2f} will be deducted from price)" if div_rate else ""
+                result["warnings"].append(
+                    f"💰 Ex-dividend date in {days_away} day(s) ({ex_date}){div_str}. "
+                    "Price drops by dividend on ex-date."
+                )
+
+        # ── Beta ─────────────────────────────────────────────────────────────
+        beta = sd.get("beta", {}).get("raw")
+        if beta:
+            result["beta"] = round(beta, 2)
+            if beta > 2.0:
+                result["score_penalty"] += 5
+                result["warnings"].append(
+                    f"⚡ High Beta ({beta:.1f}) — stock is {beta:.1f}× more volatile than NIFTY. "
+                    "Use 50% of normal position size."
+                )
+            elif beta > 1.5:
+                result["warnings"].append(
+                    f"📊 Beta {beta:.1f} — moderately volatile. "
+                    "Consider 75% of normal position size."
+                )
+
+    except Exception as exc:
+        logger.debug("Event risk fetch failed for %s: %s", symbol, exc)
+
+    result["score_penalty"] = min(result["score_penalty"], 30)
+    return result
+
+
 def get_52_week_stats(df: pd.DataFrame) -> dict:
     high_52w = float(df["High"].max())
     low_52w = float(df["Low"].min())

@@ -15,7 +15,7 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 
 from stocks_universe import ALL_STOCKS, NIFTY_50, NIFTY_NEXT_50, HIGH_MOMENTUM_MIDCAP, get_display_name
-from data_fetcher import fetch_ohlcv, get_52_week_stats, get_ticker_info, clear_cache, get_current_price
+from data_fetcher import fetch_ohlcv, get_52_week_stats, get_ticker_info, clear_cache, get_current_price, get_event_risk
 from analyzer import analyze, compute_vwap
 from screener import run_screener, filter_by_strategy, get_top_buys, get_sector_breakdown, get_summary_stats
 from risk_manager import calculate_trade_setup, quick_position_size, portfolio_health_check
@@ -372,17 +372,24 @@ with tab3:
         with st.spinner(f"Fetching {symbol_input}..."):
             df_stock = fetch_ohlcv(full_symbol, period="1y", force_refresh=True)
             fund_info = get_ticker_info(full_symbol) if show_fundamentals else {}
+            ev_risk  = get_event_risk(full_symbol)
 
         if df_stock is None:
             st.error(f"No data for **{symbol_input}**.")
         else:
             result = analyze(df_stock)
             stats = get_52_week_stats(df_stock)
-            st.session_state[f"analysis_{symbol_input}"] = (result, stats, df_stock, fund_info)
+            st.session_state[f"analysis_{symbol_input}"] = (result, stats, df_stock, fund_info, ev_risk)
 
     session_key = f"analysis_{symbol_input}"
     if session_key in st.session_state:
-        result, stats, df_stock, fund_info = st.session_state[session_key]
+        saved = st.session_state[session_key]
+        # backwards-compat: older cache entries may not have ev_risk
+        if len(saved) == 5:
+            result, stats, df_stock, fund_info, ev_risk = saved
+        else:
+            result, stats, df_stock, fund_info = saved
+            ev_risk = {}
         price = result["price"]
 
         sig_icons = {"STRONG BUY": "🟢", "BUY": "🟩", "WATCH": "🟡", "NEUTRAL": "⬜", "AVOID": "🔴"}
@@ -492,11 +499,38 @@ with tab3:
             st.markdown(f"{'⚠️' if result['rsi_overbought'] else '✅'} "
                         f"RSI Overbought: {'Yes — skip entry' if result['rsi_overbought'] else 'No'}")
 
+        # ── Event Risk Panel ──────────────────────────────────────────────────
+        st.divider()
+        penalty = ev_risk.get("score_penalty", 0)
+        adjusted_score = max(0, result["score"] - penalty)
+        warnings = ev_risk.get("warnings", [])
+
+        if warnings:
+            st.markdown("### Event Risk Alerts")
+            for w in warnings:
+                st.warning(w)
+            if penalty > 0:
+                ec1, ec2 = st.columns(2)
+                ec1.metric("Raw Score", result["score"])
+                ec2.metric(
+                    "Adjusted Score (after event risk)",
+                    adjusted_score,
+                    delta=f"-{penalty} pts",
+                    delta_color="inverse",
+                )
+        else:
+            st.success("No upcoming earnings, dividends, or high-beta warnings.")
+
+        beta_val = ev_risk.get("beta")
+        if beta_val:
+            st.caption(f"Beta: {beta_val}  ·  Earnings: {ev_risk.get('earnings_date') or 'N/A'}"
+                       f"  ·  Ex-Div: {ev_risk.get('ex_div_date') or 'N/A'}")
+
         # Trade setup
         st.divider()
         st.markdown("### Trade Setup")
         setup = calculate_trade_setup(symbol_input, price, result["atr"], capital,
-                                       risk_per_trade, result["signal"], result["score"])
+                                       risk_per_trade, result["signal"], adjusted_score)
         ts1, ts2, ts3, ts4, ts5 = st.columns(5)
         ts1.metric("Entry", f"₹{setup.entry_price:,.2f}")
         ts2.metric("Stop-Loss", f"₹{setup.stop_loss:,.2f}",
