@@ -260,7 +260,26 @@ with tab2:
             df_display = df_display[df_display["sector"] == sector_filter]
         df_display = df_display[df_display["score"] >= min_score]
 
-        st.markdown(f"### Results — {len(df_display)} stocks")
+        cols_show = ["name", "sector", "price", "score", "signal", "rsi", "adx",
+                     "macd_bullish", "golden_cross", "breakout",
+                     "ret_1m", "ret_3m", "vol_ratio"]
+        cols_available = [c for c in cols_show if c in df_display.columns]
+        renamed = {
+            "name": "Stock", "sector": "Sector", "price": "Price (₹)",
+            "score": "Score", "signal": "Signal", "rsi": "RSI",
+            "adx": "ADX", "macd_bullish": "MACD↑", "golden_cross": "GoldenX",
+            "breakout": "Breakout", "ret_1m": "1M %", "ret_3m": "3M %", "vol_ratio": "Vol Ratio",
+        }
+
+        res_col, csv_col = st.columns([4, 1])
+        res_col.markdown(f"### Results — {len(df_display)} stocks")
+        with csv_col:
+            csv_bytes = df_display[cols_available].rename(columns=renamed).to_csv(index=False).encode()
+            st.download_button(
+                "⬇️ Export CSV", data=csv_bytes,
+                file_name="nse_screener_results.csv", mime="text/csv",
+                use_container_width=True,
+            )
 
         def signal_color(val):
             colors = {
@@ -272,16 +291,6 @@ with tab2:
             }
             return colors.get(val, "")
 
-        cols_show = ["name", "sector", "price", "score", "signal", "rsi", "adx",
-                     "macd_bullish", "golden_cross", "breakout",
-                     "ret_1m", "ret_3m", "vol_ratio"]
-        cols_available = [c for c in cols_show if c in df_display.columns]
-        renamed = {
-            "name": "Stock", "sector": "Sector", "price": "Price (₹)",
-            "score": "Score", "signal": "Signal", "rsi": "RSI",
-            "adx": "ADX", "macd_bullish": "MACD↑", "golden_cross": "GoldenX",
-            "breakout": "Breakout", "ret_1m": "1M %", "ret_3m": "3M %", "vol_ratio": "Vol Ratio",
-        }
         display_df = df_display[cols_available].rename(columns=renamed)
         st.dataframe(display_df.style.map(signal_color, subset=["Signal"]),
                      use_container_width=True, height=420)
@@ -569,7 +578,7 @@ with tab4:
 with tab5:
     st.markdown("## Strategy Backtester")
     st.caption(
-        "Walk-forward backtest on 1 year of historical data. "
+        "Walk-forward backtest on 2 years of historical data. "
         "Generates a signal on day N, measures return over next N hold days with stop-loss."
     )
 
@@ -591,13 +600,13 @@ with tab5:
             st.error(f"Insufficient data for {bt_sym}. Need at least 250 trading days.")
         else:
             results_bt = backtest_all_strategies(df_bt, hold_days=hold_days, stop_loss_pct=sl_pct)
-            st.session_state[f"bt_{bt_sym}"] = (results_bt, df_bt)
+            st.session_state[f"bt_{bt_sym}"] = (results_bt, df_bt, hold_days, sl_pct)
 
     bt_key = f"bt_{bt_sym}"
     if bt_key in st.session_state:
-        results_bt, df_bt = st.session_state[bt_key]
+        results_bt, df_bt, bt_hold_days, bt_sl_pct = st.session_state[bt_key]
 
-        st.markdown(f"### {bt_sym} — Backtest Results (hold {hold_days}d, SL {sl_pct}%)")
+        st.markdown(f"### {bt_sym} — Backtest Results (hold {bt_hold_days}d, SL {bt_sl_pct}%)")
 
         # Summary table
         summary_rows = []
@@ -705,7 +714,24 @@ with tab6:
                 st.error("Entry must be above stop-loss.")
 
     if st.session_state.portfolio:
+        # Refresh live prices
+        refresh_port = st.button("🔄 Refresh Live Prices", type="primary", key="port_refresh")
+        if refresh_port:
+            with st.spinner("Fetching latest prices..."):
+                for pos in st.session_state.portfolio:
+                    sym = pos["symbol"] if pos["symbol"].endswith(".NS") else f"{pos['symbol']}.NS"
+                    try:
+                        df_tmp = fetch_ohlcv(sym, period="5d", force_refresh=True)
+                        if df_tmp is not None and not df_tmp.empty:
+                            pos["current"] = round(float(df_tmp["Close"].iloc[-1]), 2)
+                    except Exception:
+                        pass
+            from portfolio_store import save_portfolio
+            save_portfolio(st.session_state.portfolio)
+            st.success("Prices updated!")
+
         # Build rows
+        today = __import__("datetime").date.today()
         rows = []
         for pos in st.session_state.portfolio:
             invested = pos["entry"] * pos["quantity"]
@@ -713,8 +739,14 @@ with tab6:
             pnl = current_val - invested
             pnl_pct = (pnl / invested * 100) if invested > 0 else 0
             at_risk = (pos["entry"] - pos["stop_loss"]) * pos["quantity"]
+            entry_date = pos.get("entry_date", "—")
+            try:
+                hold_days_val = (today - __import__("datetime").date.fromisoformat(entry_date)).days
+            except Exception:
+                hold_days_val = "—"
             rows.append({
                 "Symbol": pos["symbol"], "Sector": pos["sector"],
+                "Entry Date": entry_date, "Hold Days": hold_days_val,
                 "Entry (₹)": pos["entry"], "Current (₹)": pos["current"],
                 "Qty": pos["quantity"], "Stop-Loss (₹)": pos["stop_loss"],
                 "Invested (₹)": round(invested, 2),
@@ -1059,9 +1091,10 @@ with tab9:
         j_t1 = jd4.number_input("Target 1 (₹)", min_value=0.01, value=116.0, key="j_t1")
         j_qty = jd5.number_input("Quantity", min_value=1, value=100, key="j_qty")
 
+        import datetime as _dt
         jdate1, jdate2 = st.columns(2)
-        j_date_in = jdate1.text_input("Date Entered (YYYY-MM-DD)", value=str(__import__("datetime").date.today()), key="j_date_in")
-        j_date_out = jdate2.text_input("Date Exited (YYYY-MM-DD)", value=str(__import__("datetime").date.today()), key="j_date_out")
+        j_date_in = str(jdate1.date_input("Date Entered", value=_dt.date.today(), key="j_date_in"))
+        j_date_out = str(jdate2.date_input("Date Exited", value=_dt.date.today(), key="j_date_out"))
 
         j_exit_reason = st.selectbox("Exit Reason", [
             "Hit Target 1", "Hit Target 2", "Hit Stop-Loss", "Trailing Stop",

@@ -32,6 +32,9 @@ def save_portfolio(positions: list[dict]) -> None:
 
 
 def add_position(positions: list[dict], new_position: dict) -> list[dict]:
+    from datetime import date
+    if "entry_date" not in new_position:
+        new_position["entry_date"] = str(date.today())
     positions.append(new_position)
     save_portfolio(positions)
     return positions
