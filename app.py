@@ -897,7 +897,7 @@ with tab5:
         # Equity curves
         st.markdown("### Equity Curves (₹1,00,000 starting capital)")
         fig_eq = go.Figure()
-        colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
+        colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
         for i, r in enumerate(results_bt):
             if r["trades"] > 0:
                 equity = compute_equity_curve(r["return_series"], 100_000)
