@@ -883,7 +883,7 @@ with tab4:
             if "is_selected_sym" not in st.session_state:
                 st.session_state.is_selected_sym = None
 
-            _btn_cols = st.columns(min(len(_df_is), 8))
+            _btn_cols = st.columns(min(len(_df_is), 8)) if len(_df_is) > 0 else []
             for _bi, (_, _brow) in enumerate(_df_is.head(8).iterrows()):
                 _sym_clean = _brow["symbol"].replace(".NS", "")
                 if _bi < len(_btn_cols):
