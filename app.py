@@ -20,7 +20,7 @@ from data_fetcher import (fetch_ohlcv, get_52_week_stats, get_ticker_info, clear
                           get_india_vix, get_vix_signal, get_fo_expiry_info,
                           get_delivery_pct, get_delivery_label)
 from analyzer import analyze, compute_vwap
-from screener import run_screener, filter_by_strategy, get_top_buys, get_sector_breakdown, get_summary_stats
+from screener import run_screener, filter_by_strategy, get_top_buys, get_sector_breakdown, get_summary_stats, run_intraday_screener
 from risk_manager import calculate_trade_setup, quick_position_size, portfolio_health_check
 from backtest import backtest_all_strategies, compute_equity_curve, compute_max_drawdown
 from portfolio_store import load_portfolio, save_portfolio, add_position, remove_position
@@ -728,117 +728,267 @@ with tab3:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 with tab4:
-    st.markdown("## Intraday Chart")
-    st.caption("1-hour candles for last 60 days. Use for same-day entry timing.")
+    st.markdown("## Intraday")
 
-    i_col1, i_col2 = st.columns([3, 1])
-    with i_col1:
-        intraday_sym = st.text_input("NSE Symbol", value="RELIANCE", key="intra_sym").strip().upper()
-    with i_col2:
-        intraday_tf = st.selectbox("Timeframe", ["1h", "30m", "15m"], index=0)
+    intra_subtab1, intra_subtab2 = st.tabs(["🔍 Intraday Screener", "📈 Single Stock Chart"])
 
-    intraday_btn = st.button("📈 Load Chart", type="primary", key="intra_btn")
+    # ── SUB-TAB A: INTRADAY SCREENER ──────────────────────────────────────────
+    with intra_subtab1:
+        st.markdown("### Intraday Screener")
+        st.caption(
+            "Scans the full stock universe on your chosen timeframe and lists only stocks "
+            "that meet ALL intraday criteria: **Price > VWAP · RSI 45–68 · MACD bullish · "
+            "Vol > 1.2× avg · ADX > 20 · Price > EMA20**"
+        )
 
-    if intraday_btn and intraday_sym:
-        full_sym = f"{intraday_sym}.NS"
-        period_map = {"1h": "60d", "30m": "30d", "15m": "10d"}
-        period = period_map[intraday_tf]
+        is_col1, is_col2, is_col3 = st.columns([2, 2, 2])
+        with is_col1:
+            is_tf = st.selectbox(
+                "Timeframe",
+                ["1h", "30m", "15m"],
+                index=0,
+                key="is_tf",
+                help="15m = last 10 days only (Yahoo limit). Use 1h for reliable scans."
+            )
+        with is_col2:
+            is_universe = st.selectbox(
+                "Universe",
+                ["NIFTY 50 (fastest)", "NIFTY 50 + NEXT 50", "Full Universe (121 stocks)"],
+                index=0,
+                key="is_universe",
+            )
+        with is_col3:
+            is_min_score = st.number_input("Min Score", 0, 100, 40, key="is_min_score")
 
-        with st.spinner(f"Fetching {intraday_tf} data for {intraday_sym}..."):
-            df_intra = fetch_ohlcv(full_sym, period=period, interval=intraday_tf, force_refresh=True)
+        is_run_btn = st.button("🔍 Scan for Intraday Setups", type="primary", key="is_run_btn")
 
-        if df_intra is None or df_intra.empty:
-            st.error(f"No intraday data for {intraday_sym}. Note: 15m data only for last 10 days.")
+        if "intraday_scan_df" not in st.session_state:
+            st.session_state.intraday_scan_df   = pd.DataFrame()
+            st.session_state.intraday_scan_tf   = ""
+            st.session_state.intraday_scan_time = ""
+
+        if is_run_btn:
+            _universe_map = {
+                "NIFTY 50 (fastest)":       NIFTY_50,
+                "NIFTY 50 + NEXT 50":       list(NIFTY_50) + list(NIFTY_NEXT_50),
+                "Full Universe (121 stocks)": ALL_STOCKS,
+            }
+            _scan_syms = _universe_map[is_universe]
+
+            is_progress = st.progress(0, text="Starting intraday scan...")
+
+            def _is_update(done, total):
+                is_progress.progress(done / total, text=f"Scanning {done}/{total}...")
+
+            with st.spinner(f"Scanning {len(_scan_syms)} stocks on {is_tf}..."):
+                _is_df = run_intraday_screener(_scan_syms, timeframe=is_tf,
+                                               progress_callback=_is_update)
+
+            is_progress.empty()
+            st.session_state.intraday_scan_df   = _is_df
+            st.session_state.intraday_scan_tf   = is_tf
+            st.session_state.intraday_scan_time = pd.Timestamp.now().strftime("%H:%M:%S")
+
+            if _is_df.empty:
+                st.warning("No stocks meet all intraday criteria right now. "
+                           "Try a higher timeframe (1h) or check back when market is active.")
+            else:
+                st.success(f"Found {len(_is_df)} intraday setup(s) on {is_tf}!")
+
+        if not st.session_state.intraday_scan_df.empty:
+            _df_is = st.session_state.intraday_scan_df.copy()
+            _df_is = _df_is[_df_is["score"] >= is_min_score]
+            _scan_tf   = st.session_state.intraday_scan_tf
+            _scan_time = st.session_state.intraday_scan_time
+
+            # Summary metrics
+            _sb = (_df_is["signal"] == "STRONG BUY").sum()
+            _b  = (_df_is["signal"] == "BUY").sum()
+            ism1, ism2, ism3, ism4 = st.columns(4)
+            ism1.metric("Setups Found",  len(_df_is))
+            ism2.metric("Strong Buy",    _sb)
+            ism3.metric("Buy",           _b)
+            ism4.metric("Scanned on",    f"{_scan_tf} @ {_scan_time}")
+
+            st.divider()
+
+            # Results table
+            _cols = ["name", "sector", "price", "vwap", "vwap_gap", "signal",
+                     "score", "rsi", "adx", "vol_ratio", "macd_cross"]
+            _cols_avail  = [c for c in _cols if c in _df_is.columns]
+            _rename = {
+                "name": "Stock", "sector": "Sector", "price": "Price (₹)",
+                "vwap": "VWAP (₹)", "vwap_gap": "Above VWAP %",
+                "signal": "Signal", "score": "Score",
+                "rsi": "RSI", "adx": "ADX",
+                "vol_ratio": "Vol Ratio", "macd_cross": "MACD Cross",
+            }
+
+            def _is_signal_color(val):
+                if val == "STRONG BUY":
+                    return "background-color:#c8e6c9;color:#1b5e20;font-weight:bold"
+                if val == "BUY":
+                    return "background-color:#dcedc8;color:#33691e"
+                return ""
+
+            def _vwap_gap_color(val):
+                if not isinstance(val, (int, float)):
+                    return ""
+                if val >= 1.0:
+                    return "background-color:#c8e6c9;color:#1b5e20"
+                if val >= 0:
+                    return "background-color:#dcedc8;color:#33691e"
+                return ""
+
+            _disp = _df_is[_cols_avail].rename(columns=_rename)
+            _style = _disp.style.map(_is_signal_color, subset=["Signal"])
+            if "Above VWAP %" in _disp.columns:
+                _style = _style.map(_vwap_gap_color, subset=["Above VWAP %"])
+            st.dataframe(_style, use_container_width=True, height=420)
+
+            # CSV export
+            _csv = _df_is[_cols_avail].rename(columns=_rename).to_csv(index=False).encode()
+            st.download_button(
+                "⬇️ Export CSV", data=_csv,
+                file_name=f"intraday_setups_{_scan_tf}.csv", mime="text/csv"
+            )
+
+            # Quick-load button: click a stock to view its chart in sub-tab 2
+            st.divider()
+            st.markdown("**Click a stock below to view its intraday chart →**")
+            _btn_cols = st.columns(min(len(_df_is), 8))
+            for _bi, (_brow_idx, _brow) in enumerate(
+                    _df_is.head(8).iterrows()):
+                _sym_clean = _brow["symbol"].replace(".NS", "")
+                if _bi < len(_btn_cols):
+                    if _btn_cols[_bi].button(
+                            _sym_clean,
+                            key=f"is_quickload_{_sym_clean}",
+                            use_container_width=True):
+                        st.session_state["intra_quick_sym"] = _sym_clean
+                        st.session_state["intra_quick_tf"]  = _scan_tf
+
+            st.caption(
+                "**How to read this table:**  "
+                "VWAP % = how far price is above VWAP (higher = stronger). "
+                "MACD Cross = fresh histogram crossover (momentum just turned). "
+                "Vol Ratio > 1.5 with MACD Cross = highest conviction setup."
+            )
         else:
-            st.session_state[f"intra_{intraday_sym}_{intraday_tf}"] = df_intra
+            st.info("Click **Scan for Intraday Setups** to find today's opportunities.")
 
-    intra_key = f"intra_{intraday_sym}_{intraday_tf}"
-    if intra_key in st.session_state:
-        df_intra = st.session_state[intra_key]
-        result_intra = analyze(df_intra)
+    # ── SUB-TAB B: SINGLE STOCK CHART ─────────────────────────────────────────
+    with intra_subtab2:
+        st.markdown("### Intraday Chart")
+        st.caption("Detailed intraday chart with VWAP, EMA 20/50, RSI, and Volume.")
 
-        # Compute VWAP (daily-anchored, meaningful for intraday timeframes)
-        vwap_series = compute_vwap(df_intra["High"], df_intra["Low"],
-                                   df_intra["Close"], df_intra["Volume"])
-        vwap_tail = vwap_series.tail(120)
-        vwap_price = float(vwap_series.iloc[-1]) if not vwap_series.empty else None
+        # Pre-fill symbol if user clicked a quick-load button in the screener
+        _default_sym = st.session_state.pop("intra_quick_sym", "RELIANCE")
+        _default_tf  = st.session_state.pop("intra_quick_tf", "1h")
 
-        # VWAP signal: price above/below VWAP
-        intra_price = result_intra["price"]
-        vwap_signal = (
-            "Above VWAP — Bullish bias" if vwap_price and intra_price > vwap_price
-            else "Below VWAP — Bearish bias" if vwap_price else "N/A"
-        )
+        i_col1, i_col2 = st.columns([3, 1])
+        with i_col1:
+            intraday_sym = st.text_input("NSE Symbol", value=_default_sym, key="intra_sym").strip().upper()
+        with i_col2:
+            _tf_options = ["1h", "30m", "15m"]
+            _tf_idx     = _tf_options.index(_default_tf) if _default_tf in _tf_options else 0
+            intraday_tf = st.selectbox("Timeframe", _tf_options, index=_tf_idx, key="intra_tf")
 
-        i1, i2, i3, i4, i5 = st.columns(5)
-        i1.metric("Current Price", f"₹{intra_price:,.2f}")
-        i2.metric("RSI", result_intra["rsi"],
-                  delta="Overbought" if result_intra["rsi_overbought"] else
-                  ("Oversold" if result_intra["rsi_oversold"] else None))
-        i3.metric("Signal", result_intra["signal"])
-        i4.metric("Score", f"{result_intra['score']}/100")
-        i5.metric("VWAP", f"₹{vwap_price:,.2f}" if vwap_price else "N/A",
-                  delta=vwap_signal,
-                  delta_color="normal" if vwap_price and intra_price > vwap_price else "inverse")
+        intraday_btn = st.button("📈 Load Chart", type="primary", key="intra_btn")
 
-        st.divider()
+        if intraday_btn and intraday_sym:
+            full_sym = f"{intraday_sym}.NS"
+            period_map = {"1h": "60d", "30m": "60d", "15m": "10d"}
+            period = period_map[intraday_tf]
 
-        # Intraday candlestick + volume
-        fig_i = make_subplots(rows=3, cols=1, shared_xaxes=True,
-                              row_heights=[0.55, 0.25, 0.20],
-                              vertical_spacing=0.03,
-                              subplot_titles=["Price + EMA 20/50 + VWAP", "RSI", "Volume"])
+            with st.spinner(f"Fetching {intraday_tf} data for {intraday_sym}..."):
+                df_intra = fetch_ohlcv(full_sym, period=period, interval=intraday_tf, force_refresh=True)
 
-        tail_df = df_intra.tail(120)
-        tail_dates = [str(d) for d in tail_df.index]
-        vwap_tail_dates = [str(d) for d in vwap_tail.index]
+            if df_intra is None or df_intra.empty:
+                st.error(f"No intraday data for {intraday_sym}. Note: 15m data only for last 10 days.")
+            else:
+                st.session_state[f"intra_{intraday_sym}_{intraday_tf}"] = df_intra
 
-        fig_i.add_trace(go.Candlestick(
-            x=tail_dates,
-            open=tail_df["Open"], high=tail_df["High"],
-            low=tail_df["Low"], close=tail_df["Close"],
-            name="Price", increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
-        ), row=1, col=1)
+        intra_key = f"intra_{intraday_sym}_{intraday_tf}"
+        if intra_key in st.session_state:
+            df_intra = st.session_state[intra_key]
+            result_intra = analyze(df_intra)
 
-        ema20_i = result_intra["ema20_series"]
-        ema50_i = result_intra["ema50_series"]
-        dates_tail_60 = result_intra["dates_series"]
-        fig_i.add_trace(go.Scatter(x=dates_tail_60, y=ema20_i, name="EMA 20",
-                                    line=dict(color="#1f77b4", width=1.2)), row=1, col=1)
-        fig_i.add_trace(go.Scatter(x=dates_tail_60, y=ema50_i, name="EMA 50",
-                                    line=dict(color="#ff7f0e", width=1.2)), row=1, col=1)
-        # VWAP — the most important intraday reference line
-        fig_i.add_trace(go.Scatter(
-            x=vwap_tail_dates, y=vwap_tail.tolist(),
-            name="VWAP", line=dict(color="#e91e63", width=1.8, dash="dot"),
-        ), row=1, col=1)
+            vwap_series = compute_vwap(df_intra["High"], df_intra["Low"],
+                                       df_intra["Close"], df_intra["Volume"])
+            vwap_tail   = vwap_series.tail(120)
+            vwap_price  = float(vwap_series.iloc[-1]) if not vwap_series.empty else None
 
-        fig_i.add_trace(go.Scatter(x=dates_tail_60, y=result_intra["rsi_series"],
-                                    line=dict(color="#9c27b0", width=1.5), name="RSI"), row=2, col=1)
-        fig_i.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.4, row=2, col=1)
-        fig_i.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.4, row=2, col=1)
+            intra_price = result_intra["price"]
+            vwap_signal = (
+                "Above VWAP — Bullish bias" if vwap_price and intra_price > vwap_price
+                else "Below VWAP — Bearish bias" if vwap_price else "N/A"
+            )
 
-        vol_s = result_intra["volume_series"]
-        vol_ma_s = result_intra["vol_ma_series"]
-        fig_i.add_trace(go.Bar(x=dates_tail_60, y=vol_s, name="Volume",
-                                marker_color="#bbdefb"), row=3, col=1)
-        fig_i.add_trace(go.Scatter(x=dates_tail_60, y=vol_ma_s, name="Vol MA",
-                                    line=dict(color="#1565c0", width=1.5, dash="dash")), row=3, col=1)
+            i1, i2, i3, i4, i5 = st.columns(5)
+            i1.metric("Current Price", f"₹{intra_price:,.2f}")
+            i2.metric("RSI", result_intra["rsi"],
+                      delta="Overbought" if result_intra["rsi_overbought"] else
+                      ("Oversold" if result_intra["rsi_oversold"] else None))
+            i3.metric("Signal", result_intra["signal"])
+            i4.metric("Score", f"{result_intra['score']}/100")
+            i5.metric("VWAP", f"₹{vwap_price:,.2f}" if vwap_price else "N/A",
+                      delta=vwap_signal,
+                      delta_color="normal" if vwap_price and intra_price > vwap_price else "inverse")
 
-        fig_i.update_layout(height=700, xaxis_rangeslider_visible=False,
-                            plot_bgcolor="white", paper_bgcolor="white")
-        st.plotly_chart(fig_i, use_container_width=True)
+            st.divider()
 
-        st.info(
-            "**Intraday Trading Tips:**\n"
-            "- Best entry times: 9:30–10:30 AM and 1:30–3:00 PM\n"
-            "- Avoid entering in the first 15 minutes (9:15–9:30 AM) — too much volatility\n"
-            "- Volume bar above MA = institutional activity. Below MA = thin, avoid\n"
-            "- RSI crossing 50 upward on hourly chart = intraday bullish momentum"
-        )
+            fig_i = make_subplots(rows=3, cols=1, shared_xaxes=True,
+                                  row_heights=[0.55, 0.25, 0.20],
+                                  vertical_spacing=0.03,
+                                  subplot_titles=["Price + EMA 20/50 + VWAP", "RSI", "Volume"])
 
-    else:
-        st.info("Enter a symbol and click **Load Chart**.")
+            tail_df         = df_intra.tail(120)
+            tail_dates      = [str(d) for d in tail_df.index]
+            vwap_tail_dates = [str(d) for d in vwap_tail.index]
+
+            fig_i.add_trace(go.Candlestick(
+                x=tail_dates,
+                open=tail_df["Open"], high=tail_df["High"],
+                low=tail_df["Low"], close=tail_df["Close"],
+                name="Price", increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
+            ), row=1, col=1)
+
+            dates_tail_60 = result_intra["dates_series"]
+            fig_i.add_trace(go.Scatter(x=dates_tail_60, y=result_intra["ema20_series"],
+                                        name="EMA 20", line=dict(color="#1f77b4", width=1.2)), row=1, col=1)
+            fig_i.add_trace(go.Scatter(x=dates_tail_60, y=result_intra["ema50_series"],
+                                        name="EMA 50", line=dict(color="#ff7f0e", width=1.2)), row=1, col=1)
+            fig_i.add_trace(go.Scatter(
+                x=vwap_tail_dates, y=vwap_tail.tolist(),
+                name="VWAP", line=dict(color="#e91e63", width=1.8, dash="dot"),
+            ), row=1, col=1)
+
+            fig_i.add_trace(go.Scatter(x=dates_tail_60, y=result_intra["rsi_series"],
+                                        line=dict(color="#9c27b0", width=1.5), name="RSI"), row=2, col=1)
+            fig_i.add_hline(y=70, line_dash="dash", line_color="red",   opacity=0.4, row=2, col=1)
+            fig_i.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.4, row=2, col=1)
+
+            fig_i.add_trace(go.Bar(x=dates_tail_60, y=result_intra["volume_series"],
+                                    name="Volume", marker_color="#bbdefb"), row=3, col=1)
+            fig_i.add_trace(go.Scatter(x=dates_tail_60, y=result_intra["vol_ma_series"],
+                                        name="Vol MA",
+                                        line=dict(color="#1565c0", width=1.5, dash="dash")), row=3, col=1)
+
+            fig_i.update_layout(height=700, xaxis_rangeslider_visible=False,
+                                plot_bgcolor="white", paper_bgcolor="white")
+            st.plotly_chart(fig_i, use_container_width=True)
+
+            st.info(
+                "**Intraday Trading Tips:**\n"
+                "- Best entry times: 9:30–10:30 AM and 1:30–3:00 PM\n"
+                "- Avoid entering in the first 15 minutes (9:15–9:30 AM) — too much volatility\n"
+                "- Volume bar above MA = institutional activity. Below MA = thin, avoid\n"
+                "- RSI crossing 50 upward on hourly chart = intraday bullish momentum"
+            )
+
+        else:
+            st.info("Enter a symbol and click **Load Chart**.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

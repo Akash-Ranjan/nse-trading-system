@@ -16,7 +16,7 @@ from typing import Optional
 import pandas as pd
 
 from data_fetcher import fetch_ohlcv, fetch_multiple, get_52_week_stats, get_market_cap_tier
-from analyzer import analyze
+from analyzer import analyze, compute_vwap
 from stocks_universe import get_sector, get_display_name
 
 logger = logging.getLogger(__name__)
@@ -208,3 +208,122 @@ def get_summary_stats(df: pd.DataFrame) -> dict:
         "oversold_bounce_count": int(df.get("strategy_oversold_bounce", pd.Series(False)).sum()),
         "bb_squeeze_count": int(df.get("strategy_bb_squeeze", pd.Series(False)).sum()),
     }
+
+
+# ── Intraday Screener ──────────────────────────────────────────────────────────
+
+def run_intraday_screener(
+    symbols: list,
+    timeframe: str = "1h",
+    progress_callback=None,
+) -> pd.DataFrame:
+    """
+    Screen stocks for intraday trading setups on 1h / 30m / 15m timeframes.
+
+    A stock qualifies as an intraday BUY when ALL of:
+      1. Price > VWAP            — bullish intraday bias (most important filter)
+      2. RSI 45–68               — healthy momentum, not overbought
+      3. MACD bullish            — trend direction confirmed
+      4. Vol ratio  > 1.2        — above-average volume (institutions active)
+      5. ADX > 20                — stock is trending, not ranging sideways
+      6. Price > EMA 20          — short-term trend intact
+
+    Upgrades to STRONG BUY when also:
+      - Fresh MACD histogram crossover (momentum just turned)
+      - Vol ratio > 1.5          — strong volume surge
+      - RSI 50–65                — ideal momentum zone
+
+    Data limits (Yahoo Finance):
+      1h  → last 60 days of 1-hour candles
+      30m → last 60 days of 30-min candles
+      15m → last 10 days of 15-min candles  ← use for same-day only
+    """
+    _PERIOD_MAP = {"1h": "60d", "30m": "60d", "15m": "10d"}
+    period = _PERIOD_MAP.get(timeframe, "60d")
+    total  = len(symbols)
+
+    # Phase 1: batch-fetch intraday OHLCV for all symbols
+    if progress_callback:
+        progress_callback(0, total)
+    price_data = fetch_multiple(symbols, period=period, interval=timeframe)
+    if progress_callback:
+        progress_callback(total // 3, total)
+
+    # Phase 2: parallel analysis
+    results = []
+    done    = 0
+
+    def _analyse(sym: str):
+        df = price_data.get(sym)
+        if df is None or len(df) < 30:
+            return None
+        try:
+            result = analyze(df)
+            price  = result["price"]
+
+            # VWAP — daily-anchored (resets each calendar day)
+            vwap_s    = compute_vwap(df["High"], df["Low"], df["Close"], df["Volume"])
+            vwap_last = vwap_s.dropna()
+            vwap_price = float(vwap_last.iloc[-1]) if not vwap_last.empty else None
+            above_vwap = bool(vwap_price and price > vwap_price)
+            vwap_gap_pct = round((price - vwap_price) / vwap_price * 100, 2) if vwap_price else None
+
+            # ── Intraday filter criteria ───────────────────────────────────────
+            qualifies = (
+                above_vwap
+                and result["macd_bullish"]
+                and 45 <= result["rsi"] <= 68
+                and result["vol_ratio"] > 1.2
+                and result["adx"] > 20
+                and price > result["ema20"]
+            )
+            if not qualifies:
+                return None
+
+            # Upgrade to STRONG BUY on confluence
+            strong = (
+                result["macd_crossover"]
+                and result["vol_ratio"] > 1.5
+                and 50 <= result["rsi"] <= 65
+            )
+
+            return {
+                "symbol":       sym,
+                "name":         get_display_name(sym),
+                "sector":       get_sector(sym),
+                "price":        price,
+                "vwap":         round(vwap_price, 2) if vwap_price else None,
+                "vwap_gap":     vwap_gap_pct,
+                "signal":       "STRONG BUY" if strong else "BUY",
+                "score":        result["score"],
+                "rsi":          result["rsi"],
+                "adx":          round(result["adx"], 1),
+                "vol_ratio":    result["vol_ratio"],
+                "macd_bullish": result["macd_bullish"],
+                "macd_cross":   result["macd_crossover"],
+                "above_vwap":   above_vwap,
+                "ema20":        result["ema20"],
+                "atr":          result["atr"],
+            }
+        except Exception as exc:
+            logger.debug("Intraday analysis failed for %s: %s", sym, exc)
+            return None
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_map = {executor.submit(_analyse, sym): sym for sym in symbols}
+        for future in as_completed(future_map):
+            done += 1
+            if progress_callback:
+                progress_callback(min(total // 3 + int(done * 2 / 3), total), total)
+            r = future.result()
+            if r is not None:
+                results.append(r)
+
+    if not results:
+        return pd.DataFrame()
+
+    df_out = pd.DataFrame(results)
+    # Sort: STRONG BUY first, then by score descending
+    df_out["_rank"] = df_out["signal"].map({"STRONG BUY": 0, "BUY": 1}).fillna(2)
+    df_out = df_out.sort_values(["_rank", "score"], ascending=[True, False]).drop(columns="_rank")
+    return df_out.reset_index(drop=True)
