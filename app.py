@@ -187,7 +187,7 @@ with tab2:
                           "Energy", "Metals", "Infra", "NBFC", "Insurance", "Cement", "Consumer"]
         sector_filter = st.selectbox("Filter by Sector", sector_options)
     with col_c:
-        min_score = st.number_input("Min Score", 0, 100, 60)
+        min_score = st.number_input("Min Score", 0, 100, 65)
 
     btn_col, clear_col, info_col = st.columns([1, 1, 4])
     with btn_col:
@@ -761,7 +761,7 @@ with tab4:
                 key="is_universe",
             )
         with is_col3:
-            is_min_score = st.number_input("Min Score", 0, 100, 60, key="is_min_score")
+            is_min_score = st.number_input("Min Score", 0, 100, 65, key="is_min_score")
 
         is_run_btn = st.button("🔍 Scan for Intraday Setups", type="primary", key="is_run_btn")
 
