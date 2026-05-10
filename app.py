@@ -49,6 +49,17 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+# ── Session State Defaults ────────────────────────────────────────────────────
+_SS_DEFAULTS = {
+    "swing_universe": "Full Universe (121 stocks)",
+    "swing_min_score": 65,
+    "is_universe":    "Full Universe (121 stocks)",
+    "is_min_score":   65,
+}
+for _k, _v in _SS_DEFAULTS.items():
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
+
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -64,7 +75,7 @@ with st.sidebar:
     universe_choice = st.selectbox(
         "Stock Universe",
         options=["Full Universe (121 stocks)", "NIFTY 50 + Next 50", "NIFTY 50 Only"],
-        index=0,
+        key="swing_universe",
     )
     universe_map = {
         "NIFTY 50 Only":             NIFTY_50,
@@ -187,7 +198,7 @@ with tab2:
                           "Energy", "Metals", "Infra", "NBFC", "Insurance", "Cement", "Consumer"]
         sector_filter = st.selectbox("Filter by Sector", sector_options)
     with col_c:
-        min_score = st.number_input("Min Score", 0, 100, 65)
+        min_score = st.number_input("Min Score", 0, 100, key="swing_min_score")
 
     btn_col, clear_col, info_col = st.columns([1, 1, 4])
     with btn_col:
