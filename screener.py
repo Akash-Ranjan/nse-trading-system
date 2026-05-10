@@ -287,11 +287,22 @@ def run_intraday_screener(
                 and 50 <= result["rsi"] <= 65
             )
 
+            # Intraday trade setup (tighter than swing: 1.0× ATR stop)
+            atr = result["atr"]
+            sl   = round(price - atr * 1.0, 2)         # 1× ATR stop
+            risk = price - sl
+            t1   = round(price + risk * 1.5, 2)        # 1:1.5 R:R
+            t2   = round(price + risk * 2.0, 2)        # 1:2   R:R
+
             return {
                 "symbol":       sym,
                 "name":         get_display_name(sym),
                 "sector":       get_sector(sym),
                 "price":        price,
+                "entry":        price,
+                "stop_loss":    sl,
+                "target_1":     t1,
+                "target_2":     t2,
                 "vwap":         round(vwap_price, 2) if vwap_price else None,
                 "vwap_gap":     vwap_gap_pct,
                 "signal":       "STRONG BUY" if strong else "BUY",
@@ -303,7 +314,7 @@ def run_intraday_screener(
                 "macd_cross":   result["macd_crossover"],
                 "above_vwap":   above_vwap,
                 "ema20":        result["ema20"],
-                "atr":          result["atr"],
+                "atr":          atr,
             }
         except Exception as exc:
             logger.debug("Intraday analysis failed for %s: %s", sym, exc)

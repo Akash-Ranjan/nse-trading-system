@@ -812,12 +812,14 @@ with tab4:
 
             st.divider()
 
-            # Results table
-            _cols = ["name", "sector", "price", "vwap", "vwap_gap", "signal",
-                     "score", "rsi", "adx", "vol_ratio", "macd_cross"]
-            _cols_avail  = [c for c in _cols if c in _df_is.columns]
+            # Results table — includes entry/SL/targets
+            _cols = ["name", "sector", "price", "entry", "stop_loss", "target_1", "target_2",
+                     "vwap", "vwap_gap", "signal", "score", "rsi", "adx", "vol_ratio", "macd_cross"]
+            _cols_avail = [c for c in _cols if c in _df_is.columns]
             _rename = {
                 "name": "Stock", "sector": "Sector", "price": "Price (₹)",
+                "entry": "Entry (₹)", "stop_loss": "Stop Loss (₹)",
+                "target_1": "Target 1 (₹)", "target_2": "Target 2 (₹)",
                 "vwap": "VWAP (₹)", "vwap_gap": "Above VWAP %",
                 "signal": "Signal", "score": "Score",
                 "rsi": "RSI", "adx": "ADX",
@@ -840,11 +842,17 @@ with tab4:
                     return "background-color:#dcedc8;color:#33691e"
                 return ""
 
-            _disp = _df_is[_cols_avail].rename(columns=_rename)
+            _disp  = _df_is[_cols_avail].rename(columns=_rename)
             _style = _disp.style.map(_is_signal_color, subset=["Signal"])
             if "Above VWAP %" in _disp.columns:
                 _style = _style.map(_vwap_gap_color, subset=["Above VWAP %"])
-            st.dataframe(_style, use_container_width=True, height=420)
+            st.dataframe(_style, use_container_width=True, height=400)
+
+            st.caption(
+                "**Stop Loss** = Entry − 1× ATR (intraday tight stop).  "
+                "**Target 1** = 1:1.5 R:R.  **Target 2** = 1:2 R:R.  "
+                "MACD Cross ✓ + Vol Ratio > 1.5 = highest conviction setup."
+            )
 
             # CSV export
             _csv = _df_is[_cols_avail].rename(columns=_rename).to_csv(index=False).encode()
@@ -853,27 +861,104 @@ with tab4:
                 file_name=f"intraday_setups_{_scan_tf}.csv", mime="text/csv"
             )
 
-            # Quick-load button: click a stock to view its chart in sub-tab 2
+            # ── Inline chart — click a stock to load its chart here ───────────
             st.divider()
-            st.markdown("**Click a stock below to view its intraday chart →**")
+            st.markdown("#### 📈 View Intraday Chart")
+            st.caption("Click a stock to load its chart right here — no tab switching needed.")
+
+            if "is_selected_sym" not in st.session_state:
+                st.session_state.is_selected_sym = None
+
             _btn_cols = st.columns(min(len(_df_is), 8))
-            for _bi, (_brow_idx, _brow) in enumerate(
-                    _df_is.head(8).iterrows()):
+            for _bi, (_, _brow) in enumerate(_df_is.head(8).iterrows()):
                 _sym_clean = _brow["symbol"].replace(".NS", "")
                 if _bi < len(_btn_cols):
+                    _active = st.session_state.is_selected_sym == _sym_clean
                     if _btn_cols[_bi].button(
-                            _sym_clean,
-                            key=f"is_quickload_{_sym_clean}",
-                            use_container_width=True):
-                        st.session_state["intra_quick_sym"] = _sym_clean
-                        st.session_state["intra_quick_tf"]  = _scan_tf
+                            f"{'▶ ' if _active else ''}{_sym_clean}",
+                            key=f"is_chart_{_sym_clean}",
+                            use_container_width=True,
+                            type="primary" if _active else "secondary"):
+                        st.session_state.is_selected_sym = _sym_clean
 
-            st.caption(
-                "**How to read this table:**  "
-                "VWAP % = how far price is above VWAP (higher = stronger). "
-                "MACD Cross = fresh histogram crossover (momentum just turned). "
-                "Vol Ratio > 1.5 with MACD Cross = highest conviction setup."
-            )
+            _sel = st.session_state.is_selected_sym
+            if _sel:
+                _sel_full = f"{_sel}.NS"
+                _period_m = {"1h": "60d", "30m": "60d", "15m": "10d"}
+                with st.spinner(f"Loading {_sel} {_scan_tf} chart..."):
+                    _df_chart = fetch_ohlcv(_sel_full, period=_period_m.get(_scan_tf, "60d"),
+                                            interval=_scan_tf)
+                if _df_chart is not None and not _df_chart.empty:
+                    _r  = analyze(_df_chart)
+                    _vw = compute_vwap(_df_chart["High"], _df_chart["Low"],
+                                       _df_chart["Close"], _df_chart["Volume"])
+
+                    # Trade setup metrics for selected stock
+                    _row = _df_is[_df_is["symbol"] == _sel_full]
+                    if not _row.empty:
+                        _r_data = _row.iloc[0]
+                        cm1, cm2, cm3, cm4, cm5, cm6 = st.columns(6)
+                        cm1.metric("Price",     f"₹{_r_data['price']:,.2f}")
+                        cm2.metric("Entry",     f"₹{_r_data['entry']:,.2f}")
+                        cm3.metric("Stop Loss", f"₹{_r_data['stop_loss']:,.2f}",
+                                   delta=f"-{((_r_data['price']-_r_data['stop_loss'])/_r_data['price']*100):.1f}%",
+                                   delta_color="inverse")
+                        cm4.metric("Target 1",  f"₹{_r_data['target_1']:,.2f}",
+                                   delta=f"+{((_r_data['target_1']-_r_data['price'])/_r_data['price']*100):.1f}%")
+                        cm5.metric("Target 2",  f"₹{_r_data['target_2']:,.2f}",
+                                   delta=f"+{((_r_data['target_2']-_r_data['price'])/_r_data['price']*100):.1f}%")
+                        cm6.metric("Signal",    _r_data["signal"])
+
+                    # Chart
+                    _fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
+                                         row_heights=[0.55, 0.25, 0.20],
+                                         vertical_spacing=0.03,
+                                         subplot_titles=[
+                                             f"{_sel} — Price + EMA20/50 + VWAP ({_scan_tf})",
+                                             "RSI", "Volume"])
+                    _tail = _df_chart.tail(120)
+                    _tdates = [str(d) for d in _tail.index]
+                    _vw_tail = _vw.tail(120)
+                    _vdates  = [str(d) for d in _vw_tail.index]
+
+                    _fig.add_trace(go.Candlestick(
+                        x=_tdates, open=_tail["Open"], high=_tail["High"],
+                        low=_tail["Low"], close=_tail["Close"], name="Price",
+                        increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
+                    ), row=1, col=1)
+                    _fig.add_trace(go.Scatter(x=_r["dates_series"], y=_r["ema20_series"],
+                        name="EMA20", line=dict(color="#1f77b4", width=1.2)), row=1, col=1)
+                    _fig.add_trace(go.Scatter(x=_r["dates_series"], y=_r["ema50_series"],
+                        name="EMA50", line=dict(color="#ff7f0e", width=1.2)), row=1, col=1)
+                    _fig.add_trace(go.Scatter(x=_vdates, y=_vw_tail.tolist(),
+                        name="VWAP", line=dict(color="#e91e63", width=1.8, dash="dot")),
+                        row=1, col=1)
+                    # Stop loss and targets as horizontal lines
+                    if not _row.empty:
+                        _r_data = _row.iloc[0]
+                        _fig.add_hline(y=_r_data["stop_loss"], line_dash="dash",
+                                       line_color="red",   opacity=0.6, row=1, col=1,
+                                       annotation_text="SL")
+                        _fig.add_hline(y=_r_data["target_1"], line_dash="dash",
+                                       line_color="green", opacity=0.6, row=1, col=1,
+                                       annotation_text="T1")
+                        _fig.add_hline(y=_r_data["target_2"], line_dash="dot",
+                                       line_color="green", opacity=0.5, row=1, col=1,
+                                       annotation_text="T2")
+                    _fig.add_trace(go.Scatter(x=_r["dates_series"], y=_r["rsi_series"],
+                        line=dict(color="#9c27b0", width=1.5), name="RSI"), row=2, col=1)
+                    _fig.add_hline(y=70, line_dash="dash", line_color="red",   opacity=0.4, row=2, col=1)
+                    _fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.4, row=2, col=1)
+                    _fig.add_trace(go.Bar(x=_r["dates_series"], y=_r["volume_series"],
+                        name="Volume", marker_color="#bbdefb"), row=3, col=1)
+                    _fig.add_trace(go.Scatter(x=_r["dates_series"], y=_r["vol_ma_series"],
+                        name="Vol MA", line=dict(color="#1565c0", width=1.5, dash="dash")), row=3, col=1)
+
+                    _fig.update_layout(height=680, xaxis_rangeslider_visible=False,
+                                       plot_bgcolor="white", paper_bgcolor="white")
+                    st.plotly_chart(_fig, use_container_width=True)
+                else:
+                    st.warning(f"Could not load chart for {_sel}.")
         else:
             st.info("Click **Scan for Intraday Setups** to find today's opportunities.")
 
