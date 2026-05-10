@@ -61,12 +61,15 @@ with st.sidebar:
 
     st.divider()
 
-    universe_choice = st.selectbox("Stock Universe", options=[
-        "NIFTY 50 (Safest)", "NIFTY 50 + Next 50", "Full Universe (Slower)"])
+    universe_choice = st.selectbox(
+        "Stock Universe",
+        options=["Full Universe (121 stocks)", "NIFTY 50 + Next 50", "NIFTY 50 Only"],
+        index=0,
+    )
     universe_map = {
-        "NIFTY 50 (Safest)": NIFTY_50,
-        "NIFTY 50 + Next 50": NIFTY_50 + NIFTY_NEXT_50,
-        "Full Universe (Slower)": ALL_STOCKS,
+        "NIFTY 50 Only":             NIFTY_50,
+        "NIFTY 50 + Next 50":        NIFTY_50 + NIFTY_NEXT_50,
+        "Full Universe (121 stocks)": ALL_STOCKS,
     }
     selected_universe = universe_map[universe_choice]
 
@@ -184,7 +187,7 @@ with tab2:
                           "Energy", "Metals", "Infra", "NBFC", "Insurance", "Cement", "Consumer"]
         sector_filter = st.selectbox("Filter by Sector", sector_options)
     with col_c:
-        min_score = st.number_input("Min Score", 0, 100, 50)
+        min_score = st.number_input("Min Score", 0, 100, 60)
 
     btn_col, clear_col, info_col = st.columns([1, 1, 4])
     with btn_col:
@@ -753,12 +756,12 @@ with tab4:
         with is_col2:
             is_universe = st.selectbox(
                 "Universe",
-                ["NIFTY 50 (fastest)", "NIFTY 50 + NEXT 50", "Full Universe (121 stocks)"],
+                ["Full Universe (121 stocks)", "NIFTY 50 + NEXT 50", "NIFTY 50 Only"],
                 index=0,
                 key="is_universe",
             )
         with is_col3:
-            is_min_score = st.number_input("Min Score", 0, 100, 40, key="is_min_score")
+            is_min_score = st.number_input("Min Score", 0, 100, 60, key="is_min_score")
 
         is_run_btn = st.button("🔍 Scan for Intraday Setups", type="primary", key="is_run_btn")
 
@@ -769,9 +772,9 @@ with tab4:
 
         if is_run_btn:
             _universe_map = {
-                "NIFTY 50 (fastest)":       NIFTY_50,
-                "NIFTY 50 + NEXT 50":       list(NIFTY_50) + list(NIFTY_NEXT_50),
-                "Full Universe (121 stocks)": ALL_STOCKS,
+                "NIFTY 50 Only":              NIFTY_50,
+                "NIFTY 50 + NEXT 50":         list(NIFTY_50) + list(NIFTY_NEXT_50),
+                "Full Universe (121 stocks)":  ALL_STOCKS,
             }
             _scan_syms = _universe_map[is_universe]
 
