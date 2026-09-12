@@ -184,6 +184,13 @@ def analyze(df: pd.DataFrame) -> dict:
     vol_avg = float(vol_ma.iloc[-1]) if not np.isnan(vol_ma.iloc[-1]) else vol_current
     vol_ratio = vol_current / vol_avg if vol_avg > 0 else 1.0
 
+    # ── 5-day sustained volume (for accumulation detection) ──
+    # Average of the last 5 days vs the 20-day average — tells us if big money
+    # has been consistently active all week, not just a single-day spike.
+    _vol5 = volume.iloc[-5:] if len(volume) >= 5 else volume
+    vol_avg_5d = float(_vol5.mean())
+    vol_ratio_5d = vol_avg_5d / vol_avg if vol_avg > 0 else 1.0
+
     # ── Momentum returns ──
     ret_1w = _pct_change(close, 5)
     ret_1m = _pct_change(close, 21)
@@ -212,6 +219,96 @@ def analyze(df: pd.DataFrame) -> dict:
     bb_position = (price - bb_lower_val) / (bb_upper_val - bb_lower_val) if (bb_upper_val - bb_lower_val) > 0 else 0.5
     bb_squeeze = (bb_upper_val - bb_lower_val) / bb_mid_val < 0.06 if bb_mid_val > 0 else False
 
+    # ── Support level detection ──────────────────────────────────────────────
+    # "At support" = price is 0–N% ABOVE a known support zone.
+    # Four zones checked (first match wins for the label):
+    #   EMA20  — dynamic short-term support (0–2% above)
+    #   EMA50  — medium-term support       (0–3% above)
+    #   BB Lower Band — statistical lower bound (0–3% above)
+    #   20-Day Low — recent floor / demand zone (0–3% above)
+    near_ema20_support  = 0.0 <= _pct_above(price, ema20_val)  <= 2.0
+    near_ema50_support  = 0.0 <= _pct_above(price, ema50_val)  <= 3.0
+    near_bb_lower_sup   = 0.0 <= _pct_above(price, bb_lower_val) <= 3.0 if bb_lower_val > 0 else False
+    low_20d = float(low.rolling(20).min().iloc[-1]) if len(low) >= 20 else float(low.min())
+    near_20d_low_sup    = 0.0 <= _pct_above(price, low_20d) <= 3.0 if low_20d > 0 else False
+
+    near_support = near_ema20_support or near_ema50_support or near_bb_lower_sup or near_20d_low_sup
+
+    if near_ema20_support:
+        support_type  = "EMA20"
+        support_level = ema20_val
+    elif near_ema50_support:
+        support_type  = "EMA50"
+        support_level = ema50_val
+    elif near_bb_lower_sup:
+        support_type  = "BB Lower"
+        support_level = bb_lower_val
+    elif near_20d_low_sup:
+        support_type  = "20D Low"
+        support_level = low_20d
+    else:
+        support_type  = "None"
+        support_level = 0.0
+
+    # ── Short-term coil / pre-breakout detection ─────────────────────────────
+    # NR7 — today's high–low range is the narrowest of the last 7 sessions.
+    # Statistically, NR7 days precede above-average directional moves.
+    current_range = float(high.iloc[-1] - low.iloc[-1])
+    if len(high) >= 7:
+        _ranges7 = [float(high.iloc[-i] - low.iloc[-i]) for i in range(1, 8)]
+        nr7 = (current_range <= min(_ranges7)) and (current_range < atr_val * 0.6)
+    else:
+        nr7 = False
+
+    # Inside Bar — today's entire range is enclosed by yesterday's candle.
+    # Signals indecision / accumulation: a low-risk entry day.
+    inside_bar = (
+        len(high) >= 2
+        and float(high.iloc[-1]) <= float(high.iloc[-2])
+        and float(low.iloc[-1])  >= float(low.iloc[-2])
+    )
+
+    # Price Compression — combined range of the last 3 candles vs ATR.
+    # Ratio < 0.75 → stock has been coiling in less than 75% of its usual range.
+    if len(high) >= 3 and atr_val > 0:
+        _r3h = float(high.iloc[-3:].max())
+        _r3l = float(low.iloc[-3:].min())
+        price_compression_ratio = (_r3h - _r3l) / atr_val
+    else:
+        price_compression_ratio = 2.0
+    price_compressed = price_compression_ratio < 0.75
+
+    # Volume dry-up on pullback — last 2-day average volume < 70% of 20-day avg
+    # while price hasn't fallen more than 2%. Healthy, low-conviction pullback.
+    _vol2 = volume.iloc[-2:] if len(volume) >= 2 else volume
+    vol_avg_2d  = float(_vol2.mean())
+    vol_dryup   = (vol_avg_2d / vol_avg < 0.70) and (ret_1w > -2.0) if vol_avg > 0 else False
+
+    # ── Resistance level detection ────────────────────────────────────────────
+    # Rolling highs (excluding today) are natural resistance / target zones.
+    res_5d  = float(high.iloc[-6:-1].max())  if len(high) >= 6  else float(high.max())
+    res_10d = float(high.iloc[-11:-1].max()) if len(high) >= 11 else float(high.max())
+    res_20d = float(high.iloc[-21:-1].max()) if len(high) >= 21 else float(high.max())
+
+    dist_to_res_5d  = _dist_to_res(price, res_5d)
+    dist_to_res_10d = _dist_to_res(price, res_10d)
+    dist_to_res_20d = _dist_to_res(price, res_20d)
+
+    # Nearest resistance strictly above current price
+    _above_res = [(d, r) for d, r in [
+        (dist_to_res_5d, res_5d),
+        (dist_to_res_10d, res_10d),
+        (dist_to_res_20d, res_20d),
+    ] if d > 0.1]
+    if _above_res:
+        dist_to_nearest_res, nearest_resistance = min(_above_res, key=lambda x: x[0])
+    else:
+        dist_to_nearest_res, nearest_resistance = 0.0, 0.0
+
+    # Clean 1–2% target: nearest resistance is 0.5–2.5% above price.
+    # This is the sweet-spot for a short swing trade with a clear exit level.
+    has_1to2_target = 0.5 <= dist_to_nearest_res <= 2.5
+
     # ── Composite Score (0–100) ──
     score = _composite_score(
         rsi_val=rsi_val,
@@ -229,6 +326,11 @@ def analyze(df: pd.DataFrame) -> dict:
         ret_3m=ret_3m,
         bb_position=bb_position,
         stoch_k_val=stoch_k_val,
+        nr7=nr7,
+        inside_bar=inside_bar,
+        price_compressed=price_compressed,
+        vol_dryup=vol_dryup,
+        has_1to2_target=has_1to2_target,
     )
 
     signal_label, signal_strength = _classify_signal(score, rsi_val, rsi_overbought)
@@ -247,6 +349,7 @@ def analyze(df: pd.DataFrame) -> dict:
         "adx": round(adx_val, 1),
         "stoch_k": round(stoch_k_val, 1),
         "vol_ratio": round(vol_ratio, 2),
+        "vol_ratio_5d": round(vol_ratio_5d, 2),
         "bb_upper": round(bb_upper_val, 2),
         "bb_lower": round(bb_lower_val, 2),
         "bb_position": round(bb_position, 2),
@@ -267,6 +370,27 @@ def analyze(df: pd.DataFrame) -> dict:
         "rsi_oversold": rsi_oversold,
         "rsi_overbought": rsi_overbought,
         "bb_squeeze": bb_squeeze,
+        "near_support": near_support,
+        "support_type": support_type,
+        "support_level": round(support_level, 2),
+
+        # Coil / pre-breakout patterns
+        "nr7": nr7,
+        "inside_bar": inside_bar,
+        "price_compressed": price_compressed,
+        "price_compression_ratio": round(price_compression_ratio, 2),
+        "vol_dryup": vol_dryup,
+
+        # Resistance levels & target proximity
+        "res_5d":  round(res_5d,  2),
+        "res_10d": round(res_10d, 2),
+        "res_20d": round(res_20d, 2),
+        "dist_to_res_5d":  dist_to_res_5d,
+        "dist_to_res_10d": dist_to_res_10d,
+        "dist_to_res_20d": dist_to_res_20d,
+        "nearest_resistance":   round(nearest_resistance, 2),
+        "dist_to_nearest_res":  dist_to_nearest_res,
+        "has_1to2_target":      has_1to2_target,
 
         # Score & recommendation
         "score": score,
@@ -293,11 +417,23 @@ def _pct_change(close: pd.Series, n: int) -> float:
     return round((close.iloc[-1] / close.iloc[-n - 1] - 1) * 100, 2)
 
 
+def _pct_above(px: float, level: float) -> float:
+    """Signed % distance of price above a level. Returns -999 if level is zero."""
+    return (px - level) / level * 100 if level > 0 else -999.0
+
+
+def _dist_to_res(px: float, res: float) -> float:
+    """% gap from price UP to resistance. Returns 0 if price is already above."""
+    return round((res - px) / px * 100, 2) if px > 0 and res > px else 0.0
+
+
 def _composite_score(
     rsi_val, macd_bullish, macd_crossover, macd_momentum,
     price_above_ema20, price_above_ema50, price_above_ema200,
     golden_cross, strong_trend, breakout, vol_ratio,
     ret_1m, ret_3m, bb_position, stoch_k_val,
+    nr7=False, inside_bar=False, price_compressed=False,
+    vol_dryup=False, has_1to2_target=False,
 ) -> int:
     score = 0.0
 
@@ -360,6 +496,23 @@ def _composite_score(
     # Stochastic — fresh from oversold
     if 30 <= stoch_k_val <= 70:
         score += 3
+
+    # Tight coil before breakout — NR7 / Inside Bar / compression (max 8)
+    # These patterns statistically precede an above-average directional move.
+    if nr7:
+        score += 8   # strongest coil signal
+    elif inside_bar:
+        score += 5
+    elif price_compressed:
+        score += 3
+
+    # Volume dry-up on pullback (+3) — weak sellers = healthy base
+    if vol_dryup:
+        score += 3
+
+    # Clear 1–2% resistance target exists (+5) — defined risk/reward
+    if has_1to2_target:
+        score += 5
 
     return min(100, int(score))
 
