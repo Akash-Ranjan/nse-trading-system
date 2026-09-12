@@ -2,11 +2,13 @@
 Stock screener — runs multiple strategies across the universe and ranks results.
 
 Strategies:
-  1. Golden Cross Trend  — EMA50 > EMA200, price above EMA200, MACD bullish
-  2. MACD Momentum       — Fresh MACD bullish crossover with RSI in healthy zone
-  3. Volume Breakout     — Price > 20-day high with vol > 1.4x average
-  4. Oversold Bounce     — RSI < 35 with MACD turning bullish
-  5. BB Squeeze Breakout — Bollinger Band squeeze resolving upward with volume
+  1. Golden Cross Trend          — EMA50 > EMA200, price above EMA200, MACD bullish
+  2. MACD Momentum               — Fresh MACD bullish crossover with RSI in healthy zone
+  3. Volume Breakout             — Price > 20-day high with vol > 1.4x average
+  4. Oversold Bounce             — RSI < 35 with MACD turning bullish
+  5. BB Squeeze Breakout         — Bollinger Band squeeze resolving upward with volume
+  6. Volume Accumulation at Support — 5-day avg vol ≥ 1.5× + price flat (±1%) + at support
+  7. Quick Setup (1-2% Target)   — NR7/Inside Bar/Coil at support with resistance 0.5–2.5% above
 """
 
 import logging
@@ -69,6 +71,24 @@ def screen_stock(symbol: str) -> Optional[dict]:
                 and result["price_above_ema200"]
                 and result["macd_bullish"]
                 and result["vol_ratio"] > 1.1
+            ),
+            # Volume Accumulation at Support: sustained high volume (avg last 5 days
+            # ≥ 1.5× the 20-day vol MA) while the price is trapped within ±1% —
+            # classic footprint of institutional accumulation before a move up.
+            "strategy_vol_accumulation": (
+                result["vol_ratio_5d"] >= 1.5
+                and abs(result["ret_1w"]) <= 1.0
+                and result["near_support"]
+            ),
+            # Quick Setup (1–2% Target): stock is coiling (NR7 / inside bar /
+            # compressed range) at a support level with a clear resistance
+            # target 0.5–2.5% above — the ideal setup for a fast 1–2% swing.
+            "strategy_quick_setup": (
+                (result["nr7"] or result["inside_bar"] or result["price_compressed"])
+                and result["near_support"]
+                and 35 <= result["rsi"] <= 65
+                and result["vol_ratio_5d"] >= 1.2
+                and result["has_1to2_target"]
             ),
         }
     except Exception as exc:
@@ -139,6 +159,18 @@ def run_screener(
                     and result["macd_bullish"]
                     and result["vol_ratio"] > 1.1
                 ),
+                "strategy_vol_accumulation": (
+                    result["vol_ratio_5d"] >= 1.5
+                    and abs(result["ret_1w"]) <= 1.0
+                    and result["near_support"]
+                ),
+                "strategy_quick_setup": (
+                    (result["nr7"] or result["inside_bar"] or result["price_compressed"])
+                    and result["near_support"]
+                    and 35 <= result["rsi"] <= 65
+                    and result["vol_ratio_5d"] >= 1.2
+                    and result["has_1to2_target"]
+                ),
             }
         except Exception as exc:
             logger.error("Analysis failed for %s: %s", sym, exc)
@@ -172,6 +204,8 @@ def filter_by_strategy(df: pd.DataFrame, strategy: str) -> pd.DataFrame:
         "Volume Breakout": "strategy_breakout",
         "Oversold Bounce": "strategy_oversold_bounce",
         "BB Squeeze Breakout": "strategy_bb_squeeze",
+        "Volume Accumulation at Support": "strategy_vol_accumulation",
+        "Quick Setup (1-2% Target)": "strategy_quick_setup",
     }.get(strategy)
 
     if strategy_col and strategy_col in df.columns:
@@ -207,6 +241,8 @@ def get_summary_stats(df: pd.DataFrame) -> dict:
         "macd_momentum_count": int(df.get("strategy_macd_momentum", pd.Series(False)).sum()),
         "oversold_bounce_count": int(df.get("strategy_oversold_bounce", pd.Series(False)).sum()),
         "bb_squeeze_count": int(df.get("strategy_bb_squeeze", pd.Series(False)).sum()),
+        "vol_accumulation_count": int(df.get("strategy_vol_accumulation", pd.Series(False)).sum()),
+        "quick_setup_count": int(df.get("strategy_quick_setup", pd.Series(False)).sum()),
     }
 
 
