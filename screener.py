@@ -26,6 +26,50 @@ logger = logging.getLogger(__name__)
 MAX_WORKERS = 8
 
 
+# ── Trade-setup helper ────────────────────────────────────────────────────────
+
+def _build_trade_fields(result: dict) -> dict:
+    """
+    Derive entry / stop / target / grade from analyze() output so every
+    screened stock already has a complete, executable trade plan.
+    Stop-loss = 1.5× ATR below entry (same as Stock Analysis tab).
+    """
+    entry = result["price"]
+    sl    = round(entry - result["atr"] * 1.5, 2)
+    risk  = max(entry - sl, 0.01)          # guard against zero ATR edge case
+    t1    = round(entry + risk * 2, 2)     # 1:2 R:R
+    t2    = round(entry + risk * 3, 2)     # 1:3 R:R
+    sl_pct = round(risk / entry * 100, 2)
+
+    score   = result["score"]
+    signal  = result.get("signal", "")
+
+    # Trade grade — quality of the setup for immediate execution
+    # A: everything aligned (trend + volume + support + clear target)
+    # B: core trend confirmed, most signals in agreement
+    # C: signal triggered but some conditions are mixed
+    if signal in ("BUY", "STRONG BUY"):
+        if (score >= 75
+                and (result.get("near_support") or result.get("has_1to2_target"))
+                and result.get("vol_ratio_5d", 1.0) >= 1.3):
+            grade = "A ⭐⭐⭐"
+        elif score >= 60:
+            grade = "B ⭐⭐"
+        else:
+            grade = "C ⭐"
+    else:
+        grade = ""
+
+    return {
+        "entry":       entry,
+        "stop_loss":   sl,
+        "target_1":    t1,
+        "target_2":    t2,
+        "sl_pct":      sl_pct,
+        "trade_grade": grade,
+    }
+
+
 # ── Single stock screener ──────────────────────────────────────────────────────
 
 def screen_stock(symbol: str) -> Optional[dict]:
@@ -45,6 +89,7 @@ def screen_stock(symbol: str) -> Optional[dict]:
             "cap_tier": get_market_cap_tier(symbol),
             **result,
             **stats_52w,
+            **_build_trade_fields(result),
             # Strategies triggered (for filtering)
             "strategy_golden_cross": (
                 result["golden_cross"]
@@ -136,6 +181,7 @@ def run_screener(
                 "cap_tier": get_market_cap_tier(sym),
                 **result,
                 **stats,
+                **_build_trade_fields(result),
                 "strategy_golden_cross": (
                     result["golden_cross"]
                     and result["price_above_ema200"]
