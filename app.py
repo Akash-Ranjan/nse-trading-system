@@ -116,7 +116,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
 with tab1:
     st.markdown('<div class="main-header">NSE Trading System v2</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="sub-header">5 strategies · Market Regime Filter · VWAP Intraday · '
+        '<div class="sub-header">7 strategies · Market Regime Filter · VWAP Intraday · '
         'Backtest · Telegram alerts · Persistent portfolio</div>', unsafe_allow_html=True)
 
     col1, col2, col3, col4 = st.columns(4)
@@ -158,7 +158,7 @@ with tab1:
 
     st.divider()
     st.markdown("### Strategies at a Glance")
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.markdown("**Golden Cross**\nEMA50 > EMA200 + price > EMA200 + MACD bullish.\n*Hold: 4–12 weeks*")
     with c2:
@@ -167,8 +167,14 @@ with tab1:
         st.markdown("**Volume Breakout**\nPrice > 20D high + volume > 1.4× avg.\n*Hold: 1–4 weeks*")
     with c4:
         st.markdown("**Oversold Bounce**\nRSI < 35 + MACD bullish + vol > 1.2×.\n*Hold: 1–3 weeks*")
+
+    c5, c6, c7 = st.columns(3)
     with c5:
         st.markdown("**BB Squeeze**\nBands contract → breakout with volume + above EMA200.\n*Hold: 1–4 weeks*")
+    with c6:
+        st.markdown("**Vol Accum @ Support** 🆕\n5-day avg vol ≥ 1.5× + price within ±1% + at EMA/BB support.\n*Hold: 1–4 weeks*")
+    with c7:
+        st.markdown("**Quick Setup 🎯** 🆕\nNR7 / Inside Bar / Coil at support + resistance 0.5–2.5% above.\n*Hold: 2–5 days*")
 
     st.divider()
     r1, r2, r3 = st.columns(3)
@@ -192,7 +198,9 @@ with tab2:
     with col_a:
         strategy_filter = st.selectbox("Filter by Strategy", [
             "All Strategies", "Golden Cross Trend", "MACD Momentum",
-            "Volume Breakout", "Oversold Bounce", "BB Squeeze Breakout"])
+            "Volume Breakout", "Oversold Bounce", "BB Squeeze Breakout",
+            "Volume Accumulation at Support",
+            "Quick Setup (1-2% Target)"])
     with col_b:
         sector_options = ["All Sectors", "Banking", "IT", "FMCG", "Pharma", "Auto",
                           "Energy", "Metals", "Infra", "NBFC", "Insurance", "Cement", "Consumer"]
@@ -421,6 +429,8 @@ with tab2:
             "Breakout": summary.get("breakout_count", 0),
             "Oversold Bounce": summary.get("oversold_bounce_count", 0),
             "BB Squeeze": summary.get("bb_squeeze_count", 0),
+            "Vol Accum @ Support": summary.get("vol_accumulation_count", 0),
+            "Quick Setup": summary.get("quick_setup_count", 0),
         }
         fig_strat = px.bar(x=list(strat_data.keys()), y=list(strat_data.values()),
                            title="Stocks Triggering Each Strategy",
@@ -435,16 +445,37 @@ with tab2:
             df_display = df_display[df_display["sector"] == sector_filter]
         df_display = df_display[df_display["score"] >= min_score]
 
+        # Quick Setup tip — the strategy works on lower-scored stocks
+        if strategy_filter == "Quick Setup (1-2% Target)" and min_score > 50:
+            st.info(
+                "💡 **Tip for Quick Setup filter:** These setups are coiling *before* trending, "
+                f"so they often score 45–65. Your current Min Score is **{min_score}** — "
+                "consider lowering it to **40–50** to catch more pre-move setups."
+            )
+
         cols_show = ["name", "sector", "price", "score", "signal", "event_risk",
                      "delivery_pct", "rsi", "adx", "macd_bullish", "golden_cross",
-                     "breakout", "ret_1m", "ret_3m", "vol_ratio"]
+                     "breakout", "strategy_vol_accumulation", "strategy_quick_setup",
+                     "support_type", "vol_ratio_5d",
+                     "nr7", "inside_bar",
+                     "nearest_resistance", "dist_to_nearest_res",
+                     "ret_1w", "ret_1m", "ret_3m", "vol_ratio"]
         cols_available = [c for c in cols_show if c in df_display.columns]
         renamed = {
             "name": "Stock", "sector": "Sector", "price": "Price (₹)",
             "score": "Score", "signal": "Signal", "event_risk": "Event Risk",
             "delivery_pct": "Delivery %",
             "rsi": "RSI", "adx": "ADX", "macd_bullish": "MACD↑", "golden_cross": "GoldenX",
-            "breakout": "Breakout", "ret_1m": "1M %", "ret_3m": "3M %", "vol_ratio": "Vol Ratio",
+            "breakout": "Breakout",
+            "strategy_vol_accumulation": "Vol@Support",
+            "strategy_quick_setup": "QuickSetup🎯",
+            "support_type": "Support At",
+            "vol_ratio_5d": "5D Vol Ratio",
+            "nr7": "NR7",
+            "inside_bar": "InsideBar",
+            "nearest_resistance": "Resistance (₹)",
+            "dist_to_nearest_res": "% to Res",
+            "ret_1w": "1W %", "ret_1m": "1M %", "ret_3m": "3M %", "vol_ratio": "Vol Ratio",
         }
 
         res_col, csv_col = st.columns([4, 1])
@@ -494,12 +525,125 @@ with tab2:
             return ""
 
         display_df = df_display[cols_available].rename(columns=renamed)
+
+        # Format boolean columns as ✅/❌ for readability
+        for _fmt_col in ["Vol@Support", "QuickSetup🎯", "NR7", "InsideBar"]:
+            if _fmt_col in display_df.columns:
+                display_df[_fmt_col] = display_df[_fmt_col].apply(
+                    lambda v: "✅" if v is True else "❌"
+                )
+
         style = display_df.style.map(signal_color, subset=["Signal"])
         if "Event Risk" in display_df.columns:
             style = style.map(event_risk_color, subset=["Event Risk"])
         if "Delivery %" in display_df.columns:
             style = style.map(delivery_color, subset=["Delivery %"])
+
+        def _bool_green(val):
+            if val == "✅":
+                return "background-color:#c8e6c9;color:#1b5e20;font-weight:bold"
+            return ""
+
+        def _pct_res_color(val):
+            """Colour the '% to Res' column: green=tight target, yellow=ok, grey=far."""
+            if not isinstance(val, (int, float)) or val <= 0:
+                return ""
+            if val <= 1.0:
+                return "background-color:#c8e6c9;color:#1b5e20;font-weight:bold"  # ≤1% — excellent
+            if val <= 2.0:
+                return "background-color:#dcedc8;color:#33691e"                   # 1-2% — good
+            if val <= 2.5:
+                return "background-color:#fff9c4;color:#f57f17"                   # 2-2.5% — borderline
+            return ""
+
+        for _bool_col in ["Vol@Support", "QuickSetup🎯", "NR7", "InsideBar"]:
+            if _bool_col in display_df.columns:
+                style = style.map(_bool_green, subset=[_bool_col])
+        if "% to Res" in display_df.columns:
+            style = style.map(_pct_res_color, subset=["% to Res"])
+
         st.dataframe(style, use_container_width=True, height=420)
+
+        # ── Dedicated Quick Setup detail panel ─────────────────────────────────
+        if strategy_filter == "Quick Setup (1-2% Target)" and "strategy_quick_setup" in df_display.columns:
+            if df_display.empty:
+                st.warning(
+                    "⚠️ **No Quick Setup stocks meet the current Min Score threshold.**  \n"
+                    "Quick Setup stocks typically score **45–70** (they are coiling, not yet trending).  \n"
+                    "👉 **Lower Min Score to 40 or 45** in the filter above to see them."
+                )
+            else:
+                qs_df = df_display.copy()
+                st.divider()
+                st.markdown("### 🎯 Quick Setup Detail — Stocks Primed for 1–2% Move")
+                st.caption(
+                    "Each stock is **coiling at support** (NR7 / Inside Bar / compressed range) "
+                    "with a clear resistance target **0.5–2.5% above**. "
+                    "Entry: current price · Target: nearest resistance · Stop: 1× ATR below entry."
+                )
+
+                qs_rows = []
+                for _, row in qs_df.iterrows():
+                    setup_type = (
+                        "NR7 🎯" if row.get("nr7") else
+                        "Inside Bar" if row.get("inside_bar") else
+                        "Compressed" if row.get("price_compressed") else "Coil"
+                    )
+                    entry  = row["price"]
+                    target = row.get("nearest_resistance", 0)
+                    atr    = row.get("atr", entry * 0.015)
+                    sl     = round(entry - atr, 2)
+                    rr     = round((target - entry) / (entry - sl), 2) if (entry - sl) > 0 and target > entry else 0
+                    qs_rows.append({
+                        "Stock":          row.get("name", row["symbol"]),
+                        "Sector":         row.get("sector", ""),
+                        "Price (₹)":      entry,
+                        "Setup":          setup_type,
+                        "Support At":     row.get("support_type", ""),
+                        "Target (₹)":     target,
+                        "% to Target":    row.get("dist_to_nearest_res", 0),
+                        "Stop Loss (₹)":  sl,
+                        "R:R":            rr,
+                        "5D Vol Ratio":   row.get("vol_ratio_5d", 0),
+                        "RSI":            row.get("rsi", 0),
+                        "Score":          row.get("score", 0),
+                    })
+
+                qs_disp = pd.DataFrame(qs_rows).sort_values("% to Target")
+
+                def _qs_pct_color(val):
+                    if not isinstance(val, (int, float)) or val <= 0:
+                        return ""
+                    if val <= 1.0:
+                        return "background-color:#c8e6c9;color:#1b5e20;font-weight:bold"
+                    if val <= 2.0:
+                        return "background-color:#dcedc8;color:#33691e"
+                    return "background-color:#fff9c4;color:#f57f17"
+
+                def _rr_color(val):
+                    if not isinstance(val, (int, float)):
+                        return ""
+                    if val >= 2.0:
+                        return "background-color:#c8e6c9;color:#1b5e20;font-weight:bold"
+                    if val >= 1.0:
+                        return "background-color:#dcedc8;color:#33691e"
+                    return "background-color:#fff9c4;color:#f57f17"
+
+                qs_style = (
+                    qs_disp.style
+                    .map(_qs_pct_color, subset=["% to Target"])
+                    .map(_rr_color,     subset=["R:R"])
+                )
+                st.dataframe(qs_style, use_container_width=True, height=min(500, len(qs_rows) * 38 + 45))
+
+                st.info(
+                    "**How to trade these:**  \n"
+                    "- **Entry:** at or just above current price  \n"
+                    "- **Stop-Loss:** 1× ATR below entry (shown above)  \n"
+                    "- **Target:** resistance level shown — book 70–80% there, trail the rest  \n"
+                    "- **Best setups:** % to Target ≤ 1.5% + R:R ≥ 1.5 + NR7 pattern  \n"
+                    "- **Confirm volume:** 5D Vol Ratio ≥ 1.3 means institutions are active"
+                )
 
         # Sector pie
         buy_stocks = df_display[df_display["signal"].isin(["BUY", "STRONG BUY"])]
@@ -647,6 +791,12 @@ with tab3:
                 ("Volume Breakout", result["breakout"]),
                 ("Strong Trend (ADX > 25)", result["strong_trend"]),
                 ("Bollinger Band Squeeze", result["bb_squeeze"]),
+                ("NR7 Coil (pre-breakout)", result.get("nr7", False)),
+                ("Inside Bar (low-risk entry)", result.get("inside_bar", False)),
+                ("Price Compressed (< 0.75× ATR)", result.get("price_compressed", False)),
+                ("Volume Dry-Up on Pullback", result.get("vol_dryup", False)),
+                ("At Support Level", result.get("near_support", False)),
+                ("Clear 1–2% Target Above", result.get("has_1to2_target", False)),
             ]:
                 st.markdown(f"{'✅' if val else '❌'} {name}")
         with sig2:
@@ -654,6 +804,10 @@ with tab3:
             st.markdown(f"EMA20: ₹{result['ema20']:,.2f}")
             st.markdown(f"EMA50: ₹{result['ema50']:,.2f}")
             st.markdown(f"EMA200: ₹{result['ema200']:,.2f}")
+            st.markdown(f"\n**Resistance targets:**")
+            st.markdown(f"5D Resistance:  ₹{result.get('res_5d', 0):,.2f}  (+{result.get('dist_to_res_5d', 0):.1f}%)")
+            st.markdown(f"10D Resistance: ₹{result.get('res_10d', 0):,.2f}  (+{result.get('dist_to_res_10d', 0):.1f}%)")
+            st.markdown(f"20D Resistance: ₹{result.get('res_20d', 0):,.2f}  (+{result.get('dist_to_res_20d', 0):.1f}%)")
             st.markdown(f"\n**Caution:**")
             st.markdown(f"{'⚠️' if result['rsi_overbought'] else '✅'} "
                         f"RSI Overbought: {'Yes — skip entry' if result['rsi_overbought'] else 'No'}")
@@ -1407,15 +1561,21 @@ Sector: Energy
 Price:  ₹2,845.00
 RSI:    54.3
 ADX:    31.2
-Vol Ratio: 1.8x
+Vol Ratio (today): 1.8x  |  5D avg: 1.6x
 
 1M Return: +4.2%  |  3M: +11.8%
+
+Support: EMA20   |   Target: ₹2,902.00  (+2.0%)
+Setup: 🎯 NR7
 
 Strategies triggered:
 ✅ Golden Cross
 ✅ MACD Momentum
 ❌ Volume Breakout
 ❌ Oversold Bounce
+❌ BB Squeeze
+❌ Vol Accum @ Support
+✅ Quick Setup 🎯
 
 Entry: ₹2,845 | Stop: ₹2,738
 Not financial advice. DYOR.
@@ -1601,7 +1761,10 @@ with tab9:
         j_dir = jc2.selectbox("Direction", ["BUY", "SHORT"], key="j_dir")
         j_strat = jc3.selectbox("Strategy Used", [
             "Golden Cross Trend", "MACD Momentum", "Volume Breakout",
-            "Oversold Bounce", "Manual / Other"], key="j_strat")
+            "Oversold Bounce", "BB Squeeze Breakout",
+            "Volume Accumulation at Support",
+            "Quick Setup (1-2% Target)",
+            "Manual / Other"], key="j_strat")
 
         jd1, jd2, jd3, jd4, jd5 = st.columns(5)
         j_entry = jd1.number_input("Entry (₹)", min_value=0.01, value=100.0, key="j_entry")
