@@ -639,23 +639,26 @@ with tab2:
                         _strategies.append(_sname)
 
                 _trade_rows.append({
+                    # ── Decision columns first (the one-line rule) ───────────
                     "Stock":           _row.get("name", _row["symbol"]),
-                    "Sector":          _row.get("sector", ""),
                     "Signal":          _row["signal"],
                     "Grade":           _row.get("trade_grade", ""),
-                    "Score":           _row["score"],
+                    "R:R":            _rr,
+                    "Event Risk":     _row.get("event_risk", ""),
+                    # ── Trade execution ──────────────────────────────────────
                     "Entry (₹)":      round(_e, 2),
                     "Stop (₹)":       round(_sl, 2),
                     "SL %":           _row.get("sl_pct", round((_e - _sl) / _e * 100, 2)),
                     "Target 1 (₹)":   round(_t1, 2),
                     "Target 2 (₹)":   round(_t2, 2),
-                    "R:R":            _rr,
                     "Qty":            _qty,
-                    "Capital (₹)":    _cap_used,
                     "Risk (₹)":       _cap_at_risk,
                     "Gain @T1 (₹)":   _gain_t1,
+                    # ── Context ──────────────────────────────────────────────
+                    "Score":           _row["score"],
+                    "Sector":          _row.get("sector", ""),
+                    "Capital (₹)":    _cap_used,
                     "Strategies":     ", ".join(_strategies) if _strategies else "—",
-                    "Event Risk":     _row.get("event_risk", ""),
                 })
 
             _trade_df = pd.DataFrame(_trade_rows)
@@ -952,6 +955,8 @@ with tab3:
             for name, val in [
                 ("Golden Cross (EMA50 > EMA200)", result["golden_cross"]),
                 ("Price above EMA 200", result["price_above_ema200"]),
+                ("Price above EMA 50",  result.get("price_above_ema50", result["price"] > result["ema50"])),
+                ("Price above EMA 20",  result.get("price_above_ema20", result["price"] > result["ema20"])),
                 ("MACD Bullish", result["macd_bullish"]),
                 ("Fresh MACD Crossover", result["macd_crossover"]),
                 ("Volume Breakout", result["breakout"]),
