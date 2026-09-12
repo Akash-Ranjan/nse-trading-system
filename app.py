@@ -453,8 +453,10 @@ with tab2:
                 "consider lowering it to **40–50** to catch more pre-move setups."
             )
 
-        cols_show = ["name", "sector", "price", "score", "signal", "event_risk",
-                     "delivery_pct", "rsi", "adx", "macd_bullish", "golden_cross",
+        cols_show = ["name", "sector", "price", "score", "signal", "trade_grade",
+                     "event_risk", "delivery_pct",
+                     "entry", "stop_loss", "sl_pct", "target_1", "target_2",
+                     "rsi", "adx", "macd_bullish", "golden_cross",
                      "breakout", "strategy_vol_accumulation", "strategy_quick_setup",
                      "support_type", "vol_ratio_5d",
                      "nr7", "inside_bar",
@@ -463,8 +465,10 @@ with tab2:
         cols_available = [c for c in cols_show if c in df_display.columns]
         renamed = {
             "name": "Stock", "sector": "Sector", "price": "Price (₹)",
-            "score": "Score", "signal": "Signal", "event_risk": "Event Risk",
-            "delivery_pct": "Delivery %",
+            "score": "Score", "signal": "Signal", "trade_grade": "Grade",
+            "event_risk": "Event Risk", "delivery_pct": "Delivery %",
+            "entry": "Entry (₹)", "stop_loss": "Stop (₹)", "sl_pct": "SL %",
+            "target_1": "Target 1 (₹)", "target_2": "Target 2 (₹)",
             "rsi": "RSI", "adx": "ADX", "macd_bullish": "MACD↑", "golden_cross": "GoldenX",
             "breakout": "Breakout",
             "strategy_vol_accumulation": "Vol@Support",
@@ -562,7 +566,169 @@ with tab2:
         if "% to Res" in display_df.columns:
             style = style.map(_pct_res_color, subset=["% to Res"])
 
+        def _grade_color(val):
+            if "A" in str(val):
+                return "background-color:#1b5e20;color:white;font-weight:bold"
+            if "B" in str(val):
+                return "background-color:#c8e6c9;color:#1b5e20;font-weight:bold"
+            if "C" in str(val):
+                return "background-color:#fff9c4;color:#f57f17"
+            return ""
+
+        if "Grade" in display_df.columns:
+            style = style.map(_grade_color, subset=["Grade"])
+
         st.dataframe(style, use_container_width=True, height=420)
+
+        # ══════════════════════════════════════════════════════════════════════
+        # 🚀 READY TO TRADE — complete trade cards for every BUY / STRONG BUY
+        # No need to check any other tab. Everything to place the order is here.
+        # ══════════════════════════════════════════════════════════════════════
+        _buy_df = df_display[
+            df_display["signal"].isin(["BUY", "STRONG BUY"])
+            & df_display.get("entry", pd.Series(dtype=float)).notna()
+        ].copy() if "entry" in df_display.columns else pd.DataFrame()
+
+        if not _buy_df.empty:
+            st.divider()
+            st.markdown("## 🚀 Ready to Trade")
+            st.caption(
+                "Every BUY / STRONG BUY stock below has a **complete, executable trade plan** "
+                "based on your capital (₹{:,.0f}) and risk ({:.1f}% per trade). "
+                "Entry, Stop-Loss, Targets and Quantity are pre-calculated — "
+                "**no need to open any other tab.**".format(capital, risk_per_trade)
+            )
+
+            # Grade summary metrics
+            _ga = int((_buy_df["trade_grade"].str.contains("A", na=False)).sum()) if "trade_grade" in _buy_df.columns else 0
+            _gb = int((_buy_df["trade_grade"].str.contains("^B", na=False, regex=True)).sum()) if "trade_grade" in _buy_df.columns else 0
+            _gc = int((_buy_df["trade_grade"].str.contains("C", na=False)).sum()) if "trade_grade" in _buy_df.columns else 0
+            _mg1, _mg2, _mg3, _mg4 = st.columns(4)
+            _mg1.metric("Total BUY Setups",  len(_buy_df))
+            _mg2.metric("Grade A ⭐⭐⭐",   _ga, help="Score ≥75 + support + volume confirmed")
+            _mg3.metric("Grade B ⭐⭐",     _gb, help="Score ≥60, core conditions met")
+            _mg4.metric("Grade C ⭐",       _gc, help="Signal triggered, some conditions mixed")
+
+            # Build trade card rows with quantity
+            _max_risk_rs = capital * risk_per_trade / 100   # ₹ at risk per trade
+            _trade_rows = []
+            for _, _row in _buy_df.iterrows():
+                _e  = _row.get("entry",    _row["price"])
+                _sl = _row.get("stop_loss", _e * 0.97)
+                _t1 = _row.get("target_1",  _e * 1.04)
+                _t2 = _row.get("target_2",  _e * 1.06)
+                _risk_per_share = max(_e - _sl, 0.01)
+                _qty = max(1, int(_max_risk_rs / _risk_per_share))
+                _cap_used       = round(_e * _qty, 2)
+                _cap_at_risk    = round(_risk_per_share * _qty, 2)
+                _gain_t1        = round((_t1 - _e) * _qty, 2)
+                _gain_t2        = round((_t2 - _e) * _qty, 2)
+                _rr             = round((_t1 - _e) / _risk_per_share, 1)
+
+                _strategies = []
+                for _sname, _scol in [
+                    ("GoldenX",    "strategy_golden_cross"),
+                    ("MACD",       "strategy_macd_momentum"),
+                    ("Breakout",   "strategy_breakout"),
+                    ("OvrSold",    "strategy_oversold_bounce"),
+                    ("BBSqueeze",  "strategy_bb_squeeze"),
+                    ("VolAccum",   "strategy_vol_accumulation"),
+                    ("QuickSetup", "strategy_quick_setup"),
+                ]:
+                    if _row.get(_scol):
+                        _strategies.append(_sname)
+
+                _trade_rows.append({
+                    "Stock":           _row.get("name", _row["symbol"]),
+                    "Sector":          _row.get("sector", ""),
+                    "Signal":          _row["signal"],
+                    "Grade":           _row.get("trade_grade", ""),
+                    "Score":           _row["score"],
+                    "Entry (₹)":      round(_e, 2),
+                    "Stop (₹)":       round(_sl, 2),
+                    "SL %":           _row.get("sl_pct", round((_e - _sl) / _e * 100, 2)),
+                    "Target 1 (₹)":   round(_t1, 2),
+                    "Target 2 (₹)":   round(_t2, 2),
+                    "R:R":            _rr,
+                    "Qty":            _qty,
+                    "Capital (₹)":    _cap_used,
+                    "Risk (₹)":       _cap_at_risk,
+                    "Gain @T1 (₹)":   _gain_t1,
+                    "Strategies":     ", ".join(_strategies) if _strategies else "—",
+                    "Event Risk":     _row.get("event_risk", ""),
+                })
+
+            _trade_df = pd.DataFrame(_trade_rows)
+
+            # Sort: Grade A first, then by score
+            _grade_order = {"A ⭐⭐⭐": 0, "B ⭐⭐": 1, "C ⭐": 2, "": 3}
+            _trade_df["_g_sort"] = _trade_df["Grade"].map(_grade_order).fillna(3)
+            _trade_df = _trade_df.sort_values(["_g_sort", "Score"], ascending=[True, False]).drop(columns="_g_sort")
+
+            def _tc_signal(val):
+                if val == "STRONG BUY":
+                    return "background-color:#1b5e20;color:white;font-weight:bold"
+                if val == "BUY":
+                    return "background-color:#c8e6c9;color:#1b5e20;font-weight:bold"
+                return ""
+
+            def _tc_grade(val):
+                if "A" in str(val):
+                    return "background-color:#1b5e20;color:white;font-weight:bold"
+                if "B" in str(val):
+                    return "background-color:#c8e6c9;color:#1b5e20;font-weight:bold"
+                if "C" in str(val):
+                    return "background-color:#fff9c4;color:#f57f17"
+                return ""
+
+            def _tc_rr(val):
+                if isinstance(val, (int, float)):
+                    if val >= 2.5: return "background-color:#c8e6c9;color:#1b5e20;font-weight:bold"
+                    if val >= 2.0: return "background-color:#dcedc8;color:#33691e"
+                    if val >= 1.5: return "background-color:#fff9c4;color:#f57f17"
+                    return "background-color:#ffcdd2;color:#b71c1c"
+                return ""
+
+            def _tc_event(val):
+                if not val: return ""
+                if str(val).startswith("🚨"): return "background-color:#ffcdd2;color:#b71c1c;font-weight:bold"
+                if str(val).startswith("⚠️"): return "background-color:#ffe0b2;color:#e65100"
+                if str(val).startswith("✅"): return "background-color:#e8f5e9;color:#2e7d32"
+                return ""
+
+            _tc_style = (
+                _trade_df.style
+                .map(_tc_signal, subset=["Signal"])
+                .map(_tc_grade,  subset=["Grade"])
+                .map(_tc_rr,     subset=["R:R"])
+            )
+            if "Event Risk" in _trade_df.columns:
+                _tc_style = _tc_style.map(_tc_event, subset=["Event Risk"])
+
+            st.dataframe(_tc_style, use_container_width=True,
+                         height=min(600, len(_trade_rows) * 38 + 46))
+
+            # CSV export for trade plan
+            _tc_csv = _trade_df.to_csv(index=False).encode()
+            st.download_button(
+                "⬇️ Export Trade Plan CSV",
+                data=_tc_csv,
+                file_name="nse_trade_plan.csv",
+                mime="text/csv",
+                use_container_width=False,
+            )
+
+            st.info(
+                "**How to use this table:**\n"
+                "- **Entry (₹):** Buy at this price (current market price)\n"
+                "- **Stop (₹):** Place a stop-loss at this level *before* buying — protects your capital\n"
+                "- **Target 1 (₹):** Book **70% of your position** here (1:2 R:R)\n"
+                "- **Target 2 (₹):** Let the remaining 30% run to this level with trailing stop\n"
+                "- **Qty:** Number of shares to buy based on your ₹{:,.0f} capital × {:.1f}% risk\n"
+                "- **R:R ≥ 2.0 (green):** Good risk/reward — take the trade\n"
+                "- **Grade A ⭐⭐⭐ (dark green):** Highest conviction — all signals aligned\n"
+                "- **Skip stocks with 🚨 Event Risk** — earnings or news can invalidate the setup".format(capital, risk_per_trade)
+            )
 
         # ── Dedicated Quick Setup detail panel ─────────────────────────────────
         if strategy_filter == "Quick Setup (1-2% Target)" and "strategy_quick_setup" in df_display.columns:
