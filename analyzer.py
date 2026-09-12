@@ -366,6 +366,8 @@ def analyze(df: pd.DataFrame) -> dict:
 
         # Boolean signals
         "golden_cross": golden_cross,
+        "price_above_ema20":  price_above_ema20,
+        "price_above_ema50":  price_above_ema50,
         "price_above_ema200": price_above_ema200,
         "macd_bullish": macd_bullish,
         "macd_crossover": macd_crossover,
@@ -450,7 +452,7 @@ def _composite_score(
       Volume (1D + 5D)       14  — institutional participation
       ADX trend strength      8  — is the trend real?
       Coil patterns (NR7…)    8  — pre-breakout spring
-      Returns (1M + 3M)       8  — moderate recent momentum
+      Returns (1M + 3M)       7  — moderate recent momentum
       BB position             5  — not extended above upper band
       Has 1–2% target         5  — defined risk/reward entry
       At support level        4  — better R:R on entry
