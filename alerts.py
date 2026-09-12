@@ -42,6 +42,23 @@ def send_telegram_message(bot_token: str, chat_id: str, text: str) -> tuple[bool
 def format_buy_alert(stock: dict) -> str:
     """Format a single stock's signal as a Telegram HTML message."""
     signal_emoji = "🟢" if stock.get("signal") == "STRONG BUY" else "🟩"
+
+    # Support & target info
+    support_str = f"Support: {stock.get('support_type', 'N/A')}"
+    res = stock.get("nearest_resistance", 0)
+    dist = stock.get("dist_to_nearest_res", 0)
+    target_str = (
+        f"Target: ₹{res:,.2f}  (+{dist:.1f}%)" if res and dist else "Target: —"
+    )
+
+    # Coil pattern badge
+    coil = (
+        "🎯 NR7" if stock.get("nr7") else
+        "📦 Inside Bar" if stock.get("inside_bar") else
+        "🔻 Compressed" if stock.get("price_compressed") else ""
+    )
+    coil_line = f"Setup: {coil}\n" if coil else ""
+
     return (
         f"{signal_emoji} <b>NSE Buy Signal — {stock['name']}</b>\n\n"
         f"Signal: <b>{stock['signal']}</b>  |  Score: <b>{stock['score']}/100</b>\n"
@@ -49,13 +66,18 @@ def format_buy_alert(stock: dict) -> str:
         f"Price:  ₹{stock['price']:,.2f}\n"
         f"RSI:    {stock['rsi']}\n"
         f"ADX:    {stock['adx']}\n"
-        f"Vol Ratio: {stock['vol_ratio']}x\n\n"
+        f"Vol Ratio (today): {stock['vol_ratio']}x  |  5D avg: {stock.get('vol_ratio_5d', '—')}x\n\n"
         f"1M Return: {stock['ret_1m']:+.1f}%  |  3M: {stock['ret_3m']:+.1f}%\n\n"
-        f"Strategies triggered:\n"
-        f"{'✅' if stock.get('strategy_golden_cross') else '❌'} Golden Cross\n"
-        f"{'✅' if stock.get('strategy_macd_momentum') else '❌'} MACD Momentum\n"
-        f"{'✅' if stock.get('strategy_breakout') else '❌'} Volume Breakout\n"
-        f"{'✅' if stock.get('strategy_oversold_bounce') else '❌'} Oversold Bounce\n\n"
+        f"{support_str}   |   {target_str}\n"
+        f"{coil_line}"
+        f"\nStrategies triggered:\n"
+        f"{'✅' if stock.get('strategy_golden_cross')      else '❌'} Golden Cross\n"
+        f"{'✅' if stock.get('strategy_macd_momentum')     else '❌'} MACD Momentum\n"
+        f"{'✅' if stock.get('strategy_breakout')          else '❌'} Volume Breakout\n"
+        f"{'✅' if stock.get('strategy_oversold_bounce')   else '❌'} Oversold Bounce\n"
+        f"{'✅' if stock.get('strategy_bb_squeeze')        else '❌'} BB Squeeze\n"
+        f"{'✅' if stock.get('strategy_vol_accumulation')  else '❌'} Vol Accum @ Support\n"
+        f"{'✅' if stock.get('strategy_quick_setup')       else '❌'} Quick Setup 🎯\n\n"
         f"<i>Entry: ₹{stock['price']:,.2f} | "
         f"Stop: ₹{round(stock['price'] - stock['atr'] * 1.5, 2):,.2f}</i>\n"
         f"<i>Not financial advice. DYOR.</i>"
