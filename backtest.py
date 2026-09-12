@@ -111,12 +111,106 @@ def _signal_bb_squeeze(df: pd.DataFrame) -> pd.Series:
     return buy
 
 
+def _signal_vol_accumulation(df: pd.DataFrame) -> pd.Series:
+    """
+    Entry: 5-day avg volume ≥ 1.5× the 20-day MA, price barely moved (±1%
+    over 5 days), and price is at a dynamic support zone (EMA20/50 or
+    Bollinger lower band or 20-day low).
+    """
+    close  = df["Close"]
+    high   = df["High"]
+    low    = df["Low"]
+    volume = df["Volume"]
+
+    ema20   = compute_ema(close, 20)
+    ema50   = compute_ema(close, 50)
+    bb_upper, bb_mid, bb_lower = compute_bollinger_bands(close)
+    vol_ma  = compute_volume_ma(volume, 20)
+
+    vol_5d_avg   = volume.rolling(5).mean()
+    vol_ratio_5d = vol_5d_avg / vol_ma.replace(0, float("nan"))
+
+    ret_1w_abs = ((close / close.shift(5)) - 1).abs() * 100
+
+    pct_above_ema20    = (close - ema20)    / ema20.replace(0, float("nan"))    * 100
+    pct_above_ema50    = (close - ema50)    / ema50.replace(0, float("nan"))    * 100
+    pct_above_bb_lower = (close - bb_lower) / bb_lower.replace(0, float("nan")) * 100
+    low_20d            = low.rolling(20).min()
+    pct_above_20d_low  = (close - low_20d)  / low_20d.replace(0, float("nan"))  * 100
+
+    near_support = (
+          ((pct_above_ema20    >= 0) & (pct_above_ema20    <= 2.0))
+        | ((pct_above_ema50    >= 0) & (pct_above_ema50    <= 3.0))
+        | ((pct_above_bb_lower >= 0) & (pct_above_bb_lower <= 3.0))
+        | ((pct_above_20d_low  >= 0) & (pct_above_20d_low  <= 3.0))
+    )
+
+    return (vol_ratio_5d >= 1.5) & (ret_1w_abs <= 1.0) & near_support
+
+
+def _signal_quick_setup(df: pd.DataFrame) -> pd.Series:
+    """
+    Entry: price is coiling (NR7 / inside bar / 3-day range < 0.75× ATR)
+    at a support level, RSI is neutral (35–65), 5-day avg vol ≥ 1.2×,
+    and the nearest prior 5-day resistance swing high is 0.5–2.5% above.
+    """
+    close  = df["Close"]
+    high   = df["High"]
+    low    = df["Low"]
+    volume = df["Volume"]
+
+    ema20   = compute_ema(close, 20)
+    ema50   = compute_ema(close, 50)
+    bb_upper, bb_mid, bb_lower = compute_bollinger_bands(close)
+    atr     = compute_atr(high, low, close)
+    rsi     = compute_rsi(close)
+    vol_ma  = compute_volume_ma(volume, 20)
+
+    # Coil patterns (vectorised)
+    current_range  = high - low
+    nr7            = current_range <= current_range.rolling(7).min()
+    inside_bar     = (high <= high.shift(1)) & (low >= low.shift(1))
+    r3_range       = high.rolling(3).max() - low.rolling(3).min()
+    price_compressed = (r3_range / atr.replace(0, float("nan"))) < 0.75
+
+    # Near support
+    pct_above_ema20    = (close - ema20)    / ema20.replace(0, float("nan"))    * 100
+    pct_above_ema50    = (close - ema50)    / ema50.replace(0, float("nan"))    * 100
+    pct_above_bb_lower = (close - bb_lower) / bb_lower.replace(0, float("nan")) * 100
+    low_20d            = low.rolling(20).min()
+    pct_above_20d_low  = (close - low_20d)  / low_20d.replace(0, float("nan"))  * 100
+
+    near_support = (
+          ((pct_above_ema20    >= 0) & (pct_above_ema20    <= 2.0))
+        | ((pct_above_ema50    >= 0) & (pct_above_ema50    <= 3.0))
+        | ((pct_above_bb_lower >= 0) & (pct_above_bb_lower <= 3.0))
+        | ((pct_above_20d_low  >= 0) & (pct_above_20d_low  <= 3.0))
+    )
+
+    # Nearest resistance = prior 5-day rolling high (excluding today)
+    res_5d       = high.shift(1).rolling(5).max()
+    dist_to_res  = (res_5d - close) / close.replace(0, float("nan")) * 100
+    has_target   = (dist_to_res >= 0.5) & (dist_to_res <= 2.5)
+
+    vol_ratio_5d = volume.rolling(5).mean() / vol_ma.replace(0, float("nan"))
+
+    return (
+        (nr7 | inside_bar | price_compressed)
+        & near_support
+        & (rsi >= 35) & (rsi <= 65)
+        & (vol_ratio_5d >= 1.2)
+        & has_target
+    )
+
+
 STRATEGIES = {
     "Golden Cross Trend": _signal_golden_cross,
     "MACD Momentum": _signal_macd_momentum,
     "Volume Breakout": _signal_volume_breakout,
     "Oversold Bounce": _signal_oversold_bounce,
     "BB Squeeze Breakout": _signal_bb_squeeze,
+    "Volume Accumulation at Support": _signal_vol_accumulation,
+    "Quick Setup (1-2% Target)": _signal_quick_setup,
 }
 
 
@@ -210,7 +304,7 @@ def backtest_all_strategies(
     hold_days: int = 15,
     stop_loss_pct: float = 5.0,
 ) -> list[dict]:
-    """Run all 4 strategies and return a list of result dicts."""
+    """Run all 7 strategies and return a list of result dicts."""
     return [
         backtest_strategy(df, name, hold_days, stop_loss_pct)
         for name in STRATEGIES
