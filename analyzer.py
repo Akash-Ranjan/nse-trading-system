@@ -205,7 +205,9 @@ def analyze(df: pd.DataFrame) -> dict:
 
     macd_bullish = macd_val > macd_sig
     macd_crossover = macd_hist_val > 0 and macd_hist_prev <= 0  # fresh crossover
-    macd_momentum = macd_hist_val > macd_hist_prev  # histogram expanding
+    # momentum: histogram must be POSITIVE and expanding — not just "less negative".
+    # Giving bonus when hist goes -10 → -8 (downtrend) is wrong.
+    macd_momentum = macd_hist_val > 0 and macd_hist_val > macd_hist_prev
 
     rsi_oversold = rsi_val < 35
     rsi_overbought = rsi_val > 75
@@ -322,6 +324,8 @@ def analyze(df: pd.DataFrame) -> dict:
         strong_trend=strong_trend,
         breakout=breakout,
         vol_ratio=vol_ratio,
+        vol_ratio_5d=vol_ratio_5d,
+        near_support=near_support,
         ret_1m=ret_1m,
         ret_3m=ret_3m,
         bb_position=bb_position,
@@ -434,85 +438,133 @@ def _composite_score(
     ret_1m, ret_3m, bb_position, stoch_k_val,
     nr7=False, inside_bar=False, price_compressed=False,
     vol_dryup=False, has_1to2_target=False,
+    vol_ratio_5d=1.0, near_support=False,
 ) -> int:
+    """
+    Composite score 0–100.  Higher = stronger buy setup.
+
+    Priority / Max points per group:
+      EMA trend alignment    20  — is the stock in an uptrend?     (most important)
+      MACD signals           18  — momentum direction & timing
+      RSI zone               15  — not overbought, healthy range
+      Volume (1D + 5D)       14  — institutional participation
+      ADX trend strength      8  — is the trend real?
+      Coil patterns (NR7…)    8  — pre-breakout spring
+      Returns (1M + 3M)       8  — moderate recent momentum
+      BB position             5  — not extended above upper band
+      Has 1–2% target         5  — defined risk/reward entry
+      At support level        4  — better R:R on entry
+      Stochastic              3  — secondary timing confirmation
+      Volume dry-up           3  — weak sellers on pullback
+      Total theoretical max  111 → capped at 100
+    """
     score = 0.0
 
-    # RSI — reward healthy range (40–65), penalise extremes
+    # ── 1. EMA trend alignment (max 20) ─────────────────────────────────────
+    # The most important filter: is the stock above its key moving averages?
+    if price_above_ema200:
+        score += 7   # in a long-term uptrend
+    if price_above_ema50:
+        score += 7   # medium-term uptrend intact
+    if price_above_ema20:
+        score += 4   # short-term trend intact
+    if golden_cross:
+        score += 2   # EMA50 crossed above EMA200 — structural bull signal
+
+    # ── 2. MACD signals (max 18) ────────────────────────────────────────────
+    # FIX: macd_momentum now only fires when histogram is POSITIVE & expanding,
+    # so a stock in a downtrend (-10 → -8 histogram) no longer earns +5.
+    if macd_bullish:
+        score += 8   # MACD line above signal — trend is up
+    if macd_crossover:
+        score += 7   # fresh histogram crossover — entry trigger
+    if macd_momentum:          # positive histogram AND growing
+        score += 3   # reduced from 5 (crossover already captures the event)
+
+    # ── 3. RSI zone (max 15) ────────────────────────────────────────────────
+    # Sweet spot 40–65: stock has momentum but isn't overbought.
     if 40 <= rsi_val <= 65:
         score += 15
     elif 35 <= rsi_val < 40:
-        score += 8
+        score += 8   # slightly under sweet-spot — recovery setups
     elif 65 < rsi_val <= 70:
-        score += 5
+        score += 5   # extended but not overbought yet
     elif rsi_val < 35:
-        score += 3  # oversold can bounce but risky
+        score += 3   # oversold — can bounce, but risky alone
 
-    # MACD signals (max 20)
-    if macd_bullish:
-        score += 8
-    if macd_crossover:
-        score += 7
-    if macd_momentum:
-        score += 5
-
-    # EMA trend alignment (max 20)
-    if price_above_ema200:
-        score += 7
-    if price_above_ema50:
-        score += 7
-    if price_above_ema20:
-        score += 4
-    if golden_cross:
-        score += 2
-
-    # Trend strength (max 8)
-    if strong_trend:
-        score += 8
-
-    # Breakout with volume (max 12)
+    # ── 4. Volume — single day + 5-day sustained (max 14) ───────────────────
+    # Single-day spike vs multi-day accumulation are both rewarded.
+    # FIX: vol_ratio_5d was computed but never scored before.
     if breakout:
-        score += 12
-    elif vol_ratio > 1.3:
-        score += 5
+        score += 10  # price > 20D high on vol > 1.4× avg — the strongest signal
+    else:
+        # Single-day volume (no breakout)
+        if vol_ratio > 1.5:
+            score += 5
+        elif vol_ratio > 1.3:
+            score += 3
+        elif vol_ratio > 1.1:
+            score += 1
 
-    # Momentum returns (max 15)
-    if ret_1m > 3:
-        score += 5
-    elif ret_1m > 0:
-        score += 2
-    if ret_3m > 8:
-        score += 6
-    elif ret_3m > 3:
+    # 5-day SUSTAINED volume (institutional accumulation over multiple days)
+    if vol_ratio_5d >= 2.0:
+        score += 4   # very strong consistent buying
+    elif vol_ratio_5d >= 1.5:
         score += 3
-    if ret_3m > 15:
-        score += 4
+    elif vol_ratio_5d >= 1.3:
+        score += 2
 
-    # Bollinger Band position — ideal: lower-mid (not overbought)
+    # ── 5. Trend strength — ADX (max 8) ─────────────────────────────────────
+    if strong_trend:            # ADX > 25
+        score += 8
+
+    # ── 6. Coil / pre-breakout patterns (max 8) ─────────────────────────────
+    if nr7:
+        score += 8   # narrowest range in 7 days — spring fully coiled
+    elif inside_bar:
+        score += 5   # today inside yesterday — low-risk entry day
+    elif price_compressed:
+        score += 3   # 3-day range < 0.75× ATR
+
+    # ── 7. Returns — moderate momentum (max 8) ──────────────────────────────
+    # FIX: removed the double-bonus where ret_3m > 15% gave 6+4=10 pts.
+    # A stock that already ran 15%+ in 3 months may have less room left.
+    # Now: clean if-elif, max 6 pts for 3M + 2 pts for 1M.
+    if ret_1m > 3:
+        score += 2
+    if ret_3m > 15:
+        score += 5   # strong multi-month trend
+    elif ret_3m > 8:
+        score += 5   # healthy medium momentum
+    elif ret_3m > 3:
+        score += 3   # mild momentum
+    elif ret_3m > 0:
+        score += 1   # at least positive
+
+    # ── 8. Bollinger Band position (max 5) ──────────────────────────────────
+    # Ideal: lower-to-mid band — room to move up, not extended.
     if 0.3 <= bb_position <= 0.65:
         score += 5
     elif bb_position < 0.3:
-        score += 2  # near lower band — possible bounce
+        score += 2   # near lower band — possible bounce
 
-    # Stochastic — fresh from oversold
+    # ── 9. Clear 1–2% resistance target (max 5) ─────────────────────────────
+    if has_1to2_target:
+        score += 5
+
+    # ── 10. At support level (max 4) ─────────────────────────────────────────
+    # FIX: near_support was computed but contributed 0 to score.
+    # Entering at support = better risk/reward, tighter stop.
+    if near_support:
+        score += 4
+
+    # ── 11. Stochastic (max 3) ───────────────────────────────────────────────
     if 30 <= stoch_k_val <= 70:
         score += 3
 
-    # Tight coil before breakout — NR7 / Inside Bar / compression (max 8)
-    # These patterns statistically precede an above-average directional move.
-    if nr7:
-        score += 8   # strongest coil signal
-    elif inside_bar:
-        score += 5
-    elif price_compressed:
-        score += 3
-
-    # Volume dry-up on pullback (+3) — weak sellers = healthy base
+    # ── 12. Volume dry-up on pullback (max 3) ────────────────────────────────
     if vol_dryup:
         score += 3
-
-    # Clear 1–2% resistance target exists (+5) — defined risk/reward
-    if has_1to2_target:
-        score += 5
 
     return min(100, int(score))
 
